@@ -1,0 +1,102 @@
+{
+  "name": "vscode-bioinformatics",
+  "displayName": "Bioinformatics",
+  "description": "Viewers for bioinformatics file formats. M1: multiple sequence alignment (a3m, a2m, fasta, sto, clu, psi).",
+  "version": "0.0.1",
+  "publisher": "vv137xyz",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Visualization", "Other"],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "fasta",
+        "aliases": ["FASTA", "fasta"],
+        "extensions": [".fasta", ".fas", ".fa", ".afa", ".afas", ".afasta"]
+      },
+      {
+        "id": "a2m",
+        "aliases": ["A2M"],
+        "extensions": [".a2m"]
+      },
+      {
+        "id": "a3m",
+        "aliases": ["A3M"],
+        "extensions": [".a3m"]
+      },
+      {
+        "id": "stockholm",
+        "aliases": ["Stockholm"],
+        "extensions": [".sto", ".stockholm"]
+      },
+      {
+        "id": "clustal",
+        "aliases": ["Clustal"],
+        "extensions": [".clu", ".aln"]
+      },
+      {
+        "id": "psi-blast",
+        "aliases": ["PSI-BLAST"],
+        "extensions": [".psi"]
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "bioinformatics.msaViewer",
+        "displayName": "MSA Viewer",
+        "selector": [
+          { "filenamePattern": "*.a3m" },
+          { "filenamePattern": "*.a2m" },
+          { "filenamePattern": "*.fasta" },
+          { "filenamePattern": "*.fas" },
+          { "filenamePattern": "*.fa" },
+          { "filenamePattern": "*.afa" },
+          { "filenamePattern": "*.afas" },
+          { "filenamePattern": "*.afasta" },
+          { "filenamePattern": "*.sto" },
+          { "filenamePattern": "*.stockholm" },
+          { "filenamePattern": "*.clu" },
+          { "filenamePattern": "*.aln" },
+          { "filenamePattern": "*.psi" },
+          { "filenamePattern": "*.hhr" }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "bioinformatics.msa.openViewer",
+        "title": "Open in MSA Viewer",
+        "shortTitle": "MSA",
+        "category": "Bioinformatics"
+      },
+      {
+        "command": "bioinformatics.msa.openSource",
+        "title": "Open as Text",
+        "category": "Bioinformatics"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "bioinformatics.msa.openViewer",
+          "when": "resourceExtname =~ /\\.(a3m|a2m|fasta|fas|fa|afa|afas|afasta|sto|stockholm|clu|aln|psi|hhr)$/",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

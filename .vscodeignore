@@ -1,0 +1,16 @@
+.vscode/**
+.vscode-test/**
+src/**
+.gitignore
+.git/**
+tsconfig.json
+**/*.map
+**/*.ts
+node_modules/**
+!node_modules/.bin/
+
+# Dev-only: not shipped to the marketplace.
+references/**
+examples/**
+package-lock.json
+CLAUDE.md

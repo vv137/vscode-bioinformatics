@@ -1,0 +1,8 @@
+node_modules/
+out/
+*.vsix
+.DS_Store
+
+# References (cloned upstreams + curated audit notes) live outside the
+# repo so we don't accidentally commit a 50 MB clone of Toolkit.
+references/
