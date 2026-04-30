@@ -781,10 +781,13 @@ html, body {
 
 .hhr-line {
   display: grid;
-  /* Tightened from 8.5rem / 3rem so the seq column gets more horizontal
-   * real estate — paired with the auto-fit breakAfter, this lets long
-   * alignments wrap fewer times on a typical window. */
-  grid-template-columns: 7rem 2.5rem 1fr 2.5rem;
+  /* Seq column is `auto` (sized to actual content) instead of `1fr`,
+   * so the end-position number sits right after the last residue of
+   * the chunk — not floated to the right edge of the window. */
+  grid-template-columns: 7rem 2.5rem auto 2.5rem;
+  /* The 4 columns add up to less than the body width, so the row
+   * naturally left-aligns; nothing fills the remaining space. */
+  justify-content: start;
   align-items: baseline;
   gap: 0.4rem;
   font-family: var(--bio-mono);

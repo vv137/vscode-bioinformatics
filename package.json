@@ -2,7 +2,7 @@
   "name": "vscode-bioinformatics",
   "displayName": "Bioinformatics",
   "description": "Viewers for bioinformatics file formats. M1: multiple sequence alignment (a3m, a2m, fasta, sto, clu, psi).",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "vv137xyz",
   "engines": {
     "vscode": "^1.85.0"
