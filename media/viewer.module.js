@@ -2068,6 +2068,37 @@
       parent.appendChild(row);
     }
 
+    function coverColorTip(mode) {
+      const cycleLine =
+        mode === "off"     ? "click → entropy → BLOSUM62 → off" :
+        mode === "entropy" ? "click → BLOSUM62 → off → entropy" :
+                             "click → off → entropy → BLOSUM62";
+      if (mode === "off") {
+        return (
+          "Coverage bars are uncolored.\n" +
+          "Bar height = non-gap residue fraction per match column.\n" +
+          cycleLine
+        );
+      }
+      if (mode === "entropy") {
+        return (
+          "Color: per-column conservation = 1 − H/ln(20)\n" +
+          "where H = Shannon entropy in nats (gaps excluded).\n" +
+          "0 = uniform (20 residues equally likely); 1 = single residue dominates.\n" +
+          cycleLine
+        );
+      }
+      // BLOSUM
+      return (
+        "Color: per-column mean BLOSUM62 sum-of-pairs (SP)\n" +
+        "SP = (Σₐ Σ_b nₐ·n_b·B[a,b] − Σₐ nₐ·B[a,a]) / (2 · N(N−1)/2)\n" +
+        "  N = recognized AAs in the column (gaps + X/B/Z/U/O excluded);\n" +
+        "  B = BLOSUM62 substitution matrix.\n" +
+        "Normalized for the ramp: clamp((SP + 2) / 8, 0, 1).\n" +
+        cycleLine
+      );
+    }
+
     function renderHistogramRow(parent, coverage, insertWidths, total, wrapper,
                                 columnInfo, colorMode, onCycleColor) {
       const row = document.createElement("div");
@@ -2089,9 +2120,7 @@
         colorMode === "blosum" ? "BLOSUM ↻" :
         colorMode === "entropy" ? "entropy ↻" : "coverage ↻";
       colorBtn.setAttribute("aria-pressed", String(colorMode !== "off"));
-      colorBtn.dataset.tip =
-        "Color coverage bars by per-column conservation.\n" +
-        "Click to cycle: off → entropy (info content) → BLOSUM62 SP";
+      colorBtn.dataset.tip = coverColorTip(colorMode);
       colorBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         if (typeof onCycleColor === "function") onCycleColor();
