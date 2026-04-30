@@ -8,6 +8,15 @@
     "vscode": "^1.85.0"
   },
   "categories": ["Visualization", "Other"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vv137/vscode-bioinformatics.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vv137/vscode-bioinformatics/issues"
+  },
+  "homepage": "https://github.com/vv137/vscode-bioinformatics#readme",
   "main": "./out/extension.js",
   "activationEvents": [],
   "contributes": {
