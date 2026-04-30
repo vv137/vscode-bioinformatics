@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "source.clustal",
+  "name": "Clustal",
+  "fileTypes": ["clu", "aln"],
+  "patterns": [
+    { "include": "#header" },
+    { "include": "#comment" },
+    { "include": "#conservation" },
+    { "include": "#sequence" }
+  ],
+  "repository": {
+    "header": {
+      "match": "^(CLUSTAL|MUSCLE|KALIGN|PROBCONS|T-COFFEE)\\b.*$",
+      "name": "meta.header.clustal",
+      "captures": {
+        "1": { "name": "keyword.control.header.clustal" }
+      }
+    },
+    "comment": {
+      "match": "^[#;].*$",
+      "name": "comment.line.clustal"
+    },
+    "conservation": {
+      "comment": "Conservation track: only [* : .] and whitespace.",
+      "match": "^[ \\t]+[*:.\\s]+$",
+      "name": "markup.italic.conservation.clustal"
+    },
+    "sequence": {
+      "match": "^(\\S+)(\\s+)([A-Za-z\\.\\-]+)(\\s+(\\d+))?\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.function.sequence.clustal" },
+        "3": { "name": "string.unquoted.sequence.clustal" },
+        "5": { "name": "constant.numeric.position.clustal" }
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "source.fasta",
+  "name": "FASTA",
+  "fileTypes": ["fasta", "fas", "fa", "afa", "afas", "afasta", "a2m", "a3m"],
+  "patterns": [
+    { "include": "#header" },
+    { "include": "#comment" },
+    { "include": "#sequence" }
+  ],
+  "repository": {
+    "header": {
+      "match": "^(>)(\\S+)([ \\t]+(.*))?$",
+      "name": "meta.header.fasta",
+      "captures": {
+        "1": { "name": "punctuation.definition.header.fasta" },
+        "2": { "name": "entity.name.tag.fasta" },
+        "4": { "name": "string.unquoted.description.fasta" }
+      }
+    },
+    "comment": {
+      "match": "^[#;].*$",
+      "name": "comment.line.fasta"
+    },
+    "sequence": {
+      "patterns": [
+        {
+          "match": "[A-Z]+",
+          "name": "constant.character.match.fasta"
+        },
+        {
+          "match": "[a-z]+",
+          "name": "string.quoted.insert.fasta"
+        },
+        {
+          "match": "[\\-]+",
+          "name": "constant.character.gap.fasta"
+        },
+        {
+          "match": "[\\.]+",
+          "name": "constant.character.gap-vs-insert.fasta"
+        },
+        {
+          "match": "\\*",
+          "name": "constant.character.stop.fasta"
+        }
+      ]
+    }
+  }
+}

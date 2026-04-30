@@ -52,6 +52,33 @@
         "extensions": [".psi"]
       }
     ],
+    "grammars": [
+      {
+        "language": "fasta",
+        "scopeName": "source.fasta",
+        "path": "./syntaxes/fasta.tmLanguage.json"
+      },
+      {
+        "language": "a2m",
+        "scopeName": "source.fasta",
+        "path": "./syntaxes/fasta.tmLanguage.json"
+      },
+      {
+        "language": "a3m",
+        "scopeName": "source.fasta",
+        "path": "./syntaxes/fasta.tmLanguage.json"
+      },
+      {
+        "language": "stockholm",
+        "scopeName": "source.stockholm",
+        "path": "./syntaxes/stockholm.tmLanguage.json"
+      },
+      {
+        "language": "clustal",
+        "scopeName": "source.clustal",
+        "path": "./syntaxes/clustal.tmLanguage.json"
+      }
+    ],
     "customEditors": [
       {
         "viewType": "bioinformatics.msaViewer",

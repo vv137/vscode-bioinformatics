@@ -1,0 +1,80 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "source.stockholm",
+  "name": "Stockholm",
+  "fileTypes": ["sto", "stockholm"],
+  "patterns": [
+    { "include": "#header" },
+    { "include": "#terminator" },
+    { "include": "#annotation" },
+    { "include": "#comment" },
+    { "include": "#sequence" }
+  ],
+  "repository": {
+    "header": {
+      "match": "^(#\\s*STOCKHOLM)\\s+(\\S+)\\s*$",
+      "name": "meta.header.stockholm",
+      "captures": {
+        "1": { "name": "keyword.control.header.stockholm" },
+        "2": { "name": "constant.numeric.version.stockholm" }
+      }
+    },
+    "terminator": {
+      "match": "^//.*$",
+      "name": "keyword.control.terminator.stockholm"
+    },
+    "annotation": {
+      "patterns": [
+        {
+          "comment": "#=GF feature value (file-wide)",
+          "match": "^(#=GF)\\s+(\\S+)\\s+(.*)$",
+          "captures": {
+            "1": { "name": "keyword.control.annotation.file.stockholm" },
+            "2": { "name": "entity.name.tag.feature.stockholm" },
+            "3": { "name": "string.unquoted.value.stockholm" }
+          }
+        },
+        {
+          "comment": "#=GS <seqname> feature value (per-sequence)",
+          "match": "^(#=GS)\\s+(\\S+)\\s+(\\S+)\\s+(.*)$",
+          "captures": {
+            "1": { "name": "keyword.control.annotation.sequence.stockholm" },
+            "2": { "name": "variable.parameter.sequence.stockholm" },
+            "3": { "name": "entity.name.tag.feature.stockholm" },
+            "4": { "name": "string.unquoted.value.stockholm" }
+          }
+        },
+        {
+          "comment": "#=GR <seqname> feature residue-track",
+          "match": "^(#=GR)\\s+(\\S+)\\s+(\\S+)\\s+(\\S+)\\s*$",
+          "captures": {
+            "1": { "name": "keyword.control.annotation.residue.stockholm" },
+            "2": { "name": "variable.parameter.sequence.stockholm" },
+            "3": { "name": "entity.name.tag.feature.stockholm" },
+            "4": { "name": "string.unquoted.track.stockholm" }
+          }
+        },
+        {
+          "comment": "#=GC feature column-track (RF, SS_cons, …)",
+          "match": "^(#=GC)\\s+(\\S+)\\s+(\\S+)\\s*$",
+          "captures": {
+            "1": { "name": "keyword.control.annotation.column.stockholm" },
+            "2": { "name": "entity.name.tag.feature.stockholm" },
+            "3": { "name": "string.unquoted.track.stockholm" }
+          }
+        }
+      ]
+    },
+    "comment": {
+      "match": "^#.*$",
+      "name": "comment.line.number-sign.stockholm"
+    },
+    "sequence": {
+      "match": "^(\\S+)\\s+([A-Za-z\\.\\-]+)\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.function.sequence.stockholm" },
+        "2": { "name": "string.unquoted.sequence.stockholm" }
+      }
+    }
+  }
+}
