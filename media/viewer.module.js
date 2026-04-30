@@ -27,6 +27,42 @@
   const VLIST_OVERSCAN = 8;
   const ROW_LINE_HEIGHT = 1.25;
   const VALID_PALETTES = new Set(["chemical", "clustalx", "taylor", "zappo"]);
+  // Coverage histogram coloring: off | entropy | blosum.
+  const VALID_COVER_COLORS = new Set(["off", "entropy", "blosum"]);
+  const COVER_COLOR_DEFAULT = "blosum";
+
+  // BLOSUM62 — used to color coverage bars by per-column conservation.
+  // Self-pair max = 11 (W↔W); off-diagonal min = -4.
+  const BLOSUM62_AA = "ARNDCQEGHILKMFPSTWYV";
+  const BLOSUM62_ROWS = [
+    [ 4,-1,-2,-2, 0,-1,-1, 0,-2,-1,-1,-1,-1,-2,-1, 1, 0,-3,-2, 0],
+    [-1, 5, 0,-2,-3, 1, 0,-2, 0,-3,-2, 2,-1,-3,-2,-1,-1,-3,-2,-3],
+    [-2, 0, 6, 1,-3, 0, 0, 0, 1,-3,-3, 0,-2,-3,-2, 1, 0,-4,-2,-3],
+    [-2,-2, 1, 6,-3, 0, 2,-1,-1,-3,-4,-1,-3,-3,-1, 0,-1,-4,-3,-3],
+    [ 0,-3,-3,-3, 9,-3,-4,-3,-3,-1,-1,-3,-1,-2,-3,-1,-1,-2,-2,-1],
+    [-1, 1, 0, 0,-3, 5, 2,-2, 0,-3,-2, 1, 0,-3,-1, 0,-1,-2,-1,-2],
+    [-1, 0, 0, 2,-4, 2, 5,-2, 0,-3,-3, 1,-2,-3,-1, 0,-1,-3,-2,-2],
+    [ 0,-2, 0,-1,-3,-2,-2, 6,-2,-4,-4,-2,-3,-3,-2, 0,-2,-2,-3,-3],
+    [-2, 0, 1,-1,-3, 0, 0,-2, 8,-3,-3,-1,-2,-1,-2,-1,-2,-2, 2,-3],
+    [-1,-3,-3,-3,-1,-3,-3,-4,-3, 4, 2,-3, 1, 0,-3,-2,-1,-3,-1, 3],
+    [-1,-2,-3,-4,-1,-2,-3,-4,-3, 2, 4,-2, 2, 0,-3,-2,-1,-2,-1, 1],
+    [-1, 2, 0,-1,-3, 1, 1,-2,-1,-3,-2, 5,-1,-3,-1, 0,-1,-3,-2,-2],
+    [-1,-1,-2,-3,-1, 0,-2,-3,-2, 1, 2,-1, 5, 0,-2,-1,-1,-1,-1, 1],
+    [-2,-3,-3,-3,-2,-3,-3,-3,-1, 0, 0,-3, 0, 6,-4,-2,-2, 1, 3,-1],
+    [-1,-2,-2,-1,-3,-1,-1,-2,-2,-3,-3,-1,-2,-4, 7,-1,-1,-4,-3,-2],
+    [ 1,-1, 1, 0,-1, 0, 0, 0,-1,-2,-2, 0,-1,-2,-1, 4, 1,-3,-2,-2],
+    [ 0,-1, 0,-1,-1,-1,-1,-2,-2,-1,-1,-1,-1,-2,-1, 1, 5,-2,-2, 0],
+    [-3,-3,-4,-4,-2,-2,-3,-2,-2,-3,-2,-3,-1, 1,-4,-3,-2,11, 2,-3],
+    [-2,-2,-2,-3,-2,-1,-2,-3, 2,-1,-1,-2,-1, 3,-3,-2,-2, 2, 7,-1],
+    [ 0,-3,-3,-3,-1,-2,-2,-3,-3, 3, 1,-2, 1,-1,-2,-2, 0,-3,-1, 4],
+  ];
+  const BLOSUM62_INDEX = new Map();
+  for (let i = 0; i < BLOSUM62_AA.length; i++) BLOSUM62_INDEX.set(BLOSUM62_AA[i], i);
+  // Practical normalization range for mean SP scores on protein columns:
+  // [-2, +6]. Clamped on both sides for the histogram color ramp.
+  const BLOSUM62_NORM_LO = -2;
+  const BLOSUM62_NORM_HI = 6;
+  const LN20 = Math.log(20);
   /** breakAfter = 0 → auto-fit to window width on every resize. Manual
    *  override clamps to [_MIN, _MAX]. */
   const BREAK_AFTER_MIN = 30;
@@ -140,6 +176,8 @@
     if (typeof state.hhrSortKey !== "string") state.hhrSortKey = "num";
     if (typeof state.hhrSortDir !== "string") state.hhrSortDir = "asc";
     if (typeof state.msaTemplatesMode !== "boolean") state.msaTemplatesMode = false;
+    if (typeof state.msaCoverColor !== "string") state.msaCoverColor = COVER_COLOR_DEFAULT;
+    if (!VALID_COVER_COLORS.has(state.msaCoverColor)) state.msaCoverColor = COVER_COLOR_DEFAULT;
     state.fontPx = clamp(state.fontPx, FONT_MIN, FONT_MAX);
     state.histPx = clamp(state.histPx, HIST_MIN, HIST_MAX);
     state.labelWidth = clamp(state.labelWidth, LABEL_MIN, LABEL_MAX);
@@ -271,12 +309,24 @@
       const info = currentColumnInfo[idx];
       if (!info) return null;
       const cov = info.total > 0 ? (info.nonGap / info.total) * 100 : 0;
-      const topPct = info.total > 0 ? (info.topCount / info.total) * 100 : 0;
-      return (
+      const consE = info.consEntropy == null ? "—" : info.consEntropy.toFixed(2);
+      const blosumStr = info.blosum == null
+        ? "—"
+        : `${info.blosum.toFixed(2)} (norm ${info.consBlosum.toFixed(2)})`;
+      const head =
         `col ${idx + 1} · query = ${info.queryRes}\n` +
         `coverage: ${info.nonGap} / ${info.total} (${cov.toFixed(1)}%)\n` +
-        `top residue: ${info.topRes} ${info.topCount}/${info.total} (${topPct.toFixed(1)}%)`
-      );
+        `entropy: ${info.entropy.toFixed(2)} nats (N_eff = ${Math.exp(info.entropy).toFixed(2)}, cons ${consE})\n` +
+        `BLOSUM62 SP: ${blosumStr}`;
+      if (!info.top || info.top.length === 0) return head;
+      const countWidth = String(info.top[0].count).length;
+      const lines = info.top.map((t) => {
+        const pct = info.total > 0 ? (t.count / info.total) * 100 : 0;
+        const c = String(t.count).padStart(countWidth, " ");
+        return `  ${t.res}  ${c}/${info.total} (${pct.toFixed(1)}%)`;
+      });
+      const label = info.top.length === 1 ? "top residue:" : `top ${info.top.length} residues:`;
+      return `${head}\n${label}\n${lines.join("\n")}`;
     }
 
     // ---- public API ----
@@ -356,7 +406,7 @@
       const stats = {
         seqLen: query.matchSeq.replace(/[-.]/g, "").length,
         depth: viewer.entries.length,
-        nEff: computeNeff(viewer.entries, query, viewer.matchLen),
+        nEff: computeNeff(currentColumnInfo, query),
         meanH,
         log10H: meanH > 0 ? Math.log10(meanH) : null,
         log2H: meanH > 0 ? Math.log2(meanH) : null,
@@ -601,6 +651,14 @@
           : null;
       }
 
+      function cycleCoverColor() {
+        const order = ["off", "entropy", "blosum"];
+        const i = order.indexOf(state.msaCoverColor);
+        state.msaCoverColor = order[(i + 1) % order.length];
+        persist();
+        drawAll();
+      }
+
       function drawAll() {
         if (state.msaTemplatesMode) {
           drawTemplatesTable();
@@ -610,7 +668,16 @@
         table.innerHTML = "";
         const insertWidths = getInsertWidths();
         renderRulerRow(table, viewer.matchLen, insertWidths);
-        renderHistogramRow(table, coverage, insertWidths, viewer.entries.length, wrapper);
+        renderHistogramRow(
+          table,
+          coverage,
+          insertWidths,
+          viewer.entries.length,
+          wrapper,
+          currentColumnInfo,
+          state.msaCoverColor,
+          cycleCoverColor,
+        );
         renderRow(table, query, "static-msa-query", insertWidths);
         table.appendChild(list);
         drawList(insertWidths);
@@ -1865,31 +1932,20 @@
       return count > 0 ? total / count : 0;
     }
 
-    function computeNeff(entries, query, matchLen) {
-      if (entries.length === 0 || matchLen === 0) return 1;
+    // Reuses per-column entropy from `columnInfo` so we don't re-walk the
+    // entries × columns matrix. Restricted to columns where the query has
+    // a residue (HHsuite/HHblits convention).
+    function computeNeff(columnInfo, query) {
+      if (!columnInfo || columnInfo.length === 0) return 1;
       const qSeq = query.matchSeq;
       let sumH = 0;
       let L = 0;
-      const counts = new Map();
-      for (let i = 0; i < matchLen; i++) {
+      for (let i = 0; i < columnInfo.length; i++) {
         const qch = qSeq.charCodeAt(i);
         if (qch === 45 || qch === 46) continue;
         L++;
-        counts.clear();
-        let total = 0;
-        for (const e of entries) {
-          const ch = e.matchSeq.charCodeAt(i);
-          if (ch === 45 || ch === 46) continue;
-          counts.set(ch, (counts.get(ch) || 0) + 1);
-          total++;
-        }
-        if (total === 0) continue;
-        let h = 0;
-        for (const v of counts.values()) {
-          const p = v / total;
-          h -= p * Math.log(p);
-        }
-        sumH += h;
+        const col = columnInfo[i];
+        if (col && col.nonGap > 0) sumH += col.entropy;
       }
       return L > 0 ? Math.exp(sumH / L) : 1;
     }
@@ -1913,23 +1969,71 @@
       const N = viewer.entries.length;
       const info = new Array(L);
       const counts = new Map();
+      const aaCounts = new Int32Array(20);
       const qSeq = query.matchSeq;
       for (let i = 0; i < L; i++) {
         counts.clear();
+        aaCounts.fill(0);
         let nonGap = 0;
+        let aaTotal = 0;
         for (const e of viewer.entries) {
           const ch = e.matchSeq[i];
           if (ch && ch !== "-" && ch !== ".") {
             nonGap++;
             counts.set(ch, (counts.get(ch) || 0) + 1);
+            const upper = ch >= "a" && ch <= "z" ? ch.toUpperCase() : ch;
+            const idx = BLOSUM62_INDEX.get(upper);
+            if (idx !== undefined) {
+              aaCounts[idx]++;
+              aaTotal++;
+            }
           }
         }
-        let topRes = "-";
-        let topCount = 0;
-        for (const [k, v] of counts) {
-          if (v > topCount) { topCount = v; topRes = k; }
+        let entropy = 0;
+        if (nonGap > 0) {
+          for (const v of counts.values()) {
+            const p = v / nonGap;
+            entropy -= p * Math.log(p);
+          }
         }
-        info[i] = { queryRes: qSeq[i] || "-", total: N, nonGap, topRes, topCount };
+        // Mean BLOSUM62 sum-of-pairs over recognized AAs (gaps + X/B/Z/U/O ignored).
+        let blosum = null;
+        if (aaTotal >= 2) {
+          let T = 0;
+          let diag = 0;
+          for (let a = 0; a < 20; a++) {
+            const ca = aaCounts[a];
+            if (ca === 0) continue;
+            const row = BLOSUM62_ROWS[a];
+            diag += ca * row[a];
+            for (let b = 0; b < 20; b++) {
+              const cb = aaCounts[b];
+              if (cb === 0) continue;
+              T += ca * cb * row[b];
+            }
+          }
+          const sumPairs = (T - diag) / 2;
+          const nPairs = (aaTotal * (aaTotal - 1)) / 2;
+          blosum = sumPairs / nPairs;
+        }
+        const consEntropy = nonGap > 0 ? 1 - entropy / LN20 : null;
+        const consBlosum = blosum == null
+          ? null
+          : Math.max(0, Math.min(1, (blosum - BLOSUM62_NORM_LO) / (BLOSUM62_NORM_HI - BLOSUM62_NORM_LO)));
+        const top = Array.from(counts.entries())
+          .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+          .slice(0, 5)
+          .map(([res, count]) => ({ res, count }));
+        info[i] = {
+          queryRes: qSeq[i] || "-",
+          total: N,
+          nonGap,
+          entropy,
+          consEntropy,
+          blosum,
+          consBlosum,
+          top,
+        };
       }
       return info;
     }
@@ -1964,25 +2068,57 @@
       parent.appendChild(row);
     }
 
-    function renderHistogramRow(parent, coverage, insertWidths, total, wrapper) {
+    function renderHistogramRow(parent, coverage, insertWidths, total, wrapper,
+                                columnInfo, colorMode, onCycleColor) {
       const row = document.createElement("div");
       row.className = "static-msa-row static-msa-histogram";
+
       const label = document.createElement("span");
       label.className = "static-msa-label";
-      label.textContent = "coverage";
-      label.title = `Non-gap residue frequency per match column (${total} sequences)\nDrag bottom edge to resize`;
+      label.title =
+        `Non-gap residue frequency per match column (${total} sequences)\n` +
+        `Drag bottom edge to resize`;
+
+      // Inline toggle. Cycles off → entropy → BLOSUM. Lives in the row's
+      // label slot so the top toolbar stays uncluttered.
+      const colorBtn = document.createElement("button");
+      colorBtn.type = "button";
+      colorBtn.className = "msa-histogram-color-btn";
+      colorBtn.dataset.colorMode = colorMode;
+      colorBtn.textContent =
+        colorMode === "blosum" ? "BLOSUM ↻" :
+        colorMode === "entropy" ? "entropy ↻" : "coverage ↻";
+      colorBtn.setAttribute("aria-pressed", String(colorMode !== "off"));
+      colorBtn.dataset.tip =
+        "Color coverage bars by per-column conservation.\n" +
+        "Click to cycle: off → entropy (info content) → BLOSUM62 SP";
+      colorBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (typeof onCycleColor === "function") onCycleColor();
+      });
+      label.appendChild(colorBtn);
+
+      const useColor = colorMode !== "off" && Array.isArray(columnInfo);
+      const colorKey = colorMode === "blosum" ? "consBlosum" : "consEntropy";
 
       const body = document.createElement("span");
       body.className = "static-msa-seq";
       const fragment = document.createDocumentFragment();
+      const consAt = (i) => {
+        if (!useColor) return null;
+        const c = columnInfo[i];
+        if (!c) return null;
+        const v = c[colorKey];
+        return typeof v === "number" ? v : null;
+      };
       if (insertWidths) {
         emitInsertGap(fragment, insertWidths[0] || 0);
         for (let i = 0; i < coverage.length; i++) {
-          emitBar(fragment, coverage[i], total, i);
+          emitBar(fragment, coverage[i], total, i, consAt(i));
           emitInsertGap(fragment, insertWidths[i + 1] || 0);
         }
       } else {
-        for (let i = 0; i < coverage.length; i++) emitBar(fragment, coverage[i], total, i);
+        for (let i = 0; i < coverage.length; i++) emitBar(fragment, coverage[i], total, i, consAt(i));
       }
       body.appendChild(fragment);
 
@@ -2047,13 +2183,21 @@
       parent.appendChild(cell);
     }
 
-    function emitBar(parent, frac, total, colIdx) {
+    function emitBar(parent, frac, total, colIdx, cons) {
       const cell = document.createElement("span");
       cell.className = "msa-histogram-cell";
       if (colIdx != null) cell.dataset.col = String(colIdx);
       const bar = document.createElement("span");
       bar.className = "msa-histogram-bar";
       bar.style.height = frac > 0 ? `max(1px, ${(frac * 100).toFixed(2)}%)` : "0";
+      // Conservation tint: light blue at low conservation, saturated blue
+      // at high. Alpha runs 0.25 → 0.9 so even uniform columns stay
+      // visible against the panel background.
+      if (cons != null) {
+        const a = 0.25 + 0.65 * cons;
+        bar.style.background = `rgba(70, 130, 230, ${a.toFixed(3)})`;
+        bar.style.opacity = "1";
+      }
       cell.appendChild(bar);
       parent.appendChild(cell);
     }

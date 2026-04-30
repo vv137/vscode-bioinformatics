@@ -373,6 +373,24 @@ html, body {
   opacity: 0.55;
 }
 
+.msa-histogram-color-btn {
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0 4px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.msa-histogram-color-btn:hover {
+  border-color: var(--bio-accent);
+}
+.msa-histogram-color-btn[aria-pressed="true"] {
+  color: var(--bio-accent);
+  border-color: rgba(70, 130, 230, 0.35);
+}
+
 .msa-histogram-insert {
   background: transparent;
   opacity: 0.3;
