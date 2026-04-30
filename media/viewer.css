@@ -923,5 +923,32 @@ html, body {
   color: var(--vscode-button-foreground, #fff);
 }
 
+/* Twin-icon secondary link chips next to a primary header link.
+ * Used to expose the canonical entry pages (UniProt, AFDB) without a
+ * hidden modifier gesture. Subdued by default; pop on hover. */
+.msa-dblink-sec {
+  display: inline-block;
+  margin-left: 0.2rem;
+  padding: 0 0.2rem;
+  border: 1px solid var(--vscode-textLink-foreground, var(--bio-accent));
+  border-radius: 2px;
+  background: transparent;
+  color: var(--vscode-textLink-foreground, var(--bio-accent));
+  font-family: var(--vscode-font-family);
+  font-size: 0.55rem;
+  line-height: 1.2;
+  vertical-align: baseline;
+  text-decoration: none;
+  opacity: 0.65;
+}
+
+.msa-dblink-sec:hover,
+.msa-dblink-sec:focus {
+  background: var(--vscode-textLink-foreground, var(--bio-accent));
+  color: var(--vscode-button-foreground, #fff);
+  opacity: 1;
+  outline: none;
+}
+
 /* Inside a static-msa-label the link inherits the label's tight padding
  * and ellipsis behavior; nothing extra needed. */

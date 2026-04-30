@@ -79,6 +79,193 @@
   }
 
   /**
+   * UniProt/UniRef FASTA header parsers — pure, return null on miss.
+   *
+   * UniProtKB:
+   *   >db|UniqueIdentifier|EntryName ProteinName OS=… [OX=…] [GN=…] [PE=…] [SV=…]
+   *   db ∈ {sp, tr}. Archived entries keep the same head with "Deleted, …"
+   *   in the protein name slot — head still parses + links.
+   *
+   * UniRef:
+   *   >UniRef{100,90,50}_UniqueIdentifier ClusterName n=Members Tax=Taxon
+   *                                                  TaxID=ID RepID=Rep
+   *
+   * Both tails use a generic tag-aware splitter so values may contain
+   * whitespace, parentheses, slashes, etc. — the only delimiter is the
+   * next known KEY= token.
+   */
+  function parseTaggedTail(tail, keys) {
+    const set = new Set(keys);
+    const out = { __name: "" };
+    if (!tail) return out;
+    const tokens = String(tail).split(/\s+/).filter((t) => t.length > 0);
+    const nameTokens = [];
+    let curKey = null;
+    let curVal = [];
+    function flush() {
+      if (curKey != null) out[curKey] = curVal.join(" ").trim();
+      curKey = null;
+      curVal = [];
+    }
+    for (const tok of tokens) {
+      const m = /^([A-Za-z]+)=(.*)$/.exec(tok);
+      if (m && set.has(m[1])) {
+        flush();
+        curKey = m[1];
+        if (m[2] !== "") curVal.push(m[2]);
+      } else if (curKey != null) {
+        curVal.push(tok);
+      } else {
+        nameTokens.push(tok);
+      }
+    }
+    flush();
+    out.__name = nameTokens.join(" ").trim();
+    return out;
+  }
+
+  // HHsuite convention: many headers carry a "/<start>-<end>" subseq
+  // range after the accession. Strip and capture it separately so the
+  // accession used for linking is the bare ID.
+  function splitAccessionRange(s) {
+    const m = /^(.+?)(?:\/(\d+)-(\d+))?$/.exec(String(s));
+    if (!m) return { acc: s, range: null };
+    return {
+      acc: m[1],
+      range: m[2] ? { start: Number(m[2]), end: Number(m[3]) } : null,
+    };
+  }
+
+  // Canonical UniProtKB accession regex from the UniProt FASTA spec.
+  // Two alternative shapes; optional "-<N>" isoform suffix. Source string
+  // form is reused inside other patterns via UNIPROT_ACC_SRC.
+  const UNIPROT_ACC_SRC =
+    "(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})(?:-\\d+)?";
+  const UNIPROT_ACC_RE = new RegExp(`^${UNIPROT_ACC_SRC}$`);
+  const UNIPROT_KB_HEADER_RE = new RegExp(
+    `^(sp|tr)\\|(${UNIPROT_ACC_SRC})\\|(\\S+?)(?:\\/(\\d+)-(\\d+))?(?:\\s+(.+))?$`,
+    "i",
+  );
+
+  function parseUniProtKbHeader(text) {
+    if (!text) return null;
+    const m = UNIPROT_KB_HEADER_RE.exec(String(text).trim());
+    if (!m) return null;
+    const tail = parseTaggedTail(m[6] || "", ["OS", "OX", "GN", "PE", "SV"]);
+    return {
+      kind: "uniprotkb",
+      db: m[1].toLowerCase(),
+      accession: m[2].toUpperCase(),
+      entryName: m[3],
+      range: m[4] ? { start: Number(m[4]), end: Number(m[5]) } : null,
+      proteinName: tail.__name,
+      os: tail.OS, ox: tail.OX, gn: tail.GN, pe: tail.PE, sv: tail.SV,
+    };
+  }
+
+  // UniParc identifiers: "UPI" followed by exactly 10 uppercase hex
+  // digits (e.g. UPI00012E1B92). FASTA tail may carry "status=active".
+  const UNIPARC_ID_RE = /^UPI[0-9A-F]{10}$/i;
+  function parseUniParcHeader(text) {
+    if (!text) return null;
+    const m = /^(UPI[0-9A-F]{10})(?:\/(\d+)-(\d+))?(?:\s+(.+))?$/i.exec(String(text).trim());
+    if (!m) return null;
+    const tail = parseTaggedTail(m[4] || "", ["status"]);
+    return {
+      kind: "uniparc",
+      accession: m[1].toUpperCase(),
+      range: m[2] ? { start: Number(m[2]), end: Number(m[3]) } : null,
+      status: tail.status,
+    };
+  }
+
+  function parseUniRefHeader(text) {
+    if (!text) return null;
+    const m = /^(UniRef(?:100|90|50))_(\S+?)(?:\s+(.+))?$/.exec(String(text).trim());
+    if (!m) return null;
+    const { acc, range } = splitAccessionRange(m[2]);
+    const tail = parseTaggedTail(m[3] || "", ["n", "Tax", "TaxID", "RepID"]);
+    return {
+      kind: "uniref",
+      cluster: m[1],
+      accession: acc,
+      range,
+      fullId: `${m[1]}_${acc}`,
+      clusterName: tail.__name,
+      n: tail.n, tax: tail.Tax, taxId: tail.TaxID, repId: tail.RepID,
+    };
+  }
+
+  // Secondary chip rendered after the primary head link. Single AFDB
+  // affordance — the primary click already goes to the canonical entry
+  // (UniProt entry / UniRef cluster), so this chip just exposes the
+  // structural alternative.
+  function secondaryHeaderLinks(parsed, link) {
+    if (link && link.kind === "uniprot" && link.id) {
+      return [{
+        url: `https://alphafold.ebi.ac.uk/entry/${link.id}`,
+        label: "AFDB",
+        tip: `AlphaFold DB → ${link.id}`,
+      }];
+    }
+    if (link && link.kind === "uniref"
+        && parsed && parsed.kind === "uniref"
+        && parsed.accession
+        && UNIPROT_ACC_RE.test(parsed.accession)) {
+      return [{
+        url: `https://alphafold.ebi.ac.uk/entry/${parsed.accession}`,
+        label: "AFDB",
+        tip: `AlphaFold DB → ${parsed.accession} (UniRef rep)`,
+      }];
+    }
+    return [];
+  }
+
+  function formatHeaderTip(parsed, link) {
+    const lines = [];
+    if (link && link.url) lines.push(`${link.label || "open"} → ${link.url}`);
+    if (parsed.kind === "uniprotkb") {
+      const dbLabel = parsed.db === "sp" ? "Swiss-Prot" : "TrEMBL";
+      const accLine = parsed.range
+        ? `${dbLabel} · ${parsed.accession}/${parsed.range.start}-${parsed.range.end}`
+        : `${dbLabel} · ${parsed.accession}`;
+      lines.push(accLine);
+      if (parsed.entryName) lines.push(`Entry: ${parsed.entryName}`);
+      if (parsed.proteinName) lines.push(`Protein: ${parsed.proteinName}`);
+      if (parsed.os) {
+        lines.push(parsed.ox
+          ? `Organism: ${parsed.os} (taxID ${parsed.ox})`
+          : `Organism: ${parsed.os}`);
+      }
+      if (parsed.gn) lines.push(`Gene: ${parsed.gn}`);
+      const meta = [];
+      if (parsed.pe) meta.push(`PE=${parsed.pe}`);
+      if (parsed.sv) meta.push(`SV=${parsed.sv}`);
+      if (meta.length) lines.push(meta.join(" · "));
+    } else if (parsed.kind === "uniparc") {
+      const accLine = parsed.range
+        ? `UniParc · ${parsed.accession}/${parsed.range.start}-${parsed.range.end}`
+        : `UniParc · ${parsed.accession}`;
+      lines.push(accLine);
+      if (parsed.status) lines.push(`Status: ${parsed.status}`);
+    } else if (parsed.kind === "uniref") {
+      const repLine = parsed.range
+        ? `${parsed.cluster} · rep ${parsed.accession}/${parsed.range.start}-${parsed.range.end}`
+        : `${parsed.cluster} · rep ${parsed.accession}`;
+      lines.push(repLine);
+      if (parsed.clusterName) lines.push(`Cluster: ${parsed.clusterName}`);
+      if (parsed.n) lines.push(`Members: ${parsed.n}`);
+      if (parsed.tax) {
+        lines.push(parsed.taxId
+          ? `Tax: ${parsed.tax} (taxID ${parsed.taxId})`
+          : `Tax: ${parsed.tax}`);
+      }
+      if (parsed.repId) lines.push(`RepID: ${parsed.repId}`);
+    }
+    return lines.join("\n");
+  }
+
+  /**
    * Default DB link resolver — accession-shape heuristics. Returns
    * { url, label } for the first matching database, or null.
    *
@@ -101,16 +288,32 @@
       const id = m[1].toUpperCase();
       return { url: `https://www.rcsb.org/structure/${id}`, label: "PDB", kind: "pdb", id };
     }
-    // UniProt accession (Swiss-Prot + TrEMBL) — link to AlphaFold DB,
-    // which has a predicted structure for ~all UniProt entries and is
-    // more useful than the UniProt page when browsing MSA hits.
-    if (/^([OPQ][0-9][A-Z0-9]{3}[0-9])$/.test(text)
-      || /^([A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})$/.test(text)) {
-      return { url: `https://alphafold.ebi.ac.uk/entry/${text}`, label: "AFDB" };
+    // UniProtKB pipe-delimited form: "sp|P12345|FOO_HUMAN" / "tr|...|...".
+    // Primary click → canonical UniProt entry; AFDB lives in a chip.
+    if ((m = /^(sp|tr)\|([A-Z0-9]+(?:-\d+)?)\|(\S+)$/i.exec(text))) {
+      const acc = m[2].toUpperCase();
+      return { url: `https://www.uniprot.org/uniprotkb/${acc}/entry`, label: "UniProt", kind: "uniprot", id: acc };
     }
-    // UniRef cluster (e.g. "UniRef90_P12345").
-    if ((m = /^(UniRef\d+_[\w.-]+)$/.exec(text))) {
-      return { url: `https://www.uniprot.org/uniref/${m[1]}`, label: "UniRef" };
+    // UniProt accession (Swiss-Prot + TrEMBL), optionally with HHsuite
+    // "/start-end" subseq suffix.
+    {
+      const bare = text.replace(/\/\d+-\d+$/, "");
+      if (UNIPROT_ACC_RE.test(bare)) {
+        return { url: `https://www.uniprot.org/uniprotkb/${bare}/entry`, label: "UniProt", kind: "uniprot", id: bare };
+      }
+    }
+    // UniRef cluster (e.g. "UniRef90_P12345" or "UniRef90_A0A409W2S0/241-416").
+    if ((m = /^(UniRef\d+)_([\w.-]+?)(?:\/(\d+)-(\d+))?$/.exec(text))) {
+      const fullId = `${m[1]}_${m[2]}`;
+      return { url: `https://www.uniprot.org/uniref/${fullId}`, label: "UniRef", kind: "uniref", id: fullId };
+    }
+    // UniParc: "UPI" + 10 hex digits, optional "/start-end" subseq.
+    {
+      const bare = text.replace(/\/\d+-\d+$/, "");
+      if (UNIPARC_ID_RE.test(bare)) {
+        const id = bare.toUpperCase();
+        return { url: `https://www.uniprot.org/uniparc/${id}/entry`, label: "UniParc", kind: "uniparc", id };
+      }
     }
     // MGnify protein (e.g. "MGYP000510094044", optionally with a /start-end suffix).
     if ((m = /^(MGYP\d+)(?:\/.*)?$/.exec(text))) {
@@ -1777,6 +1980,15 @@
       const head = m ? m[1] : text;
       const tail = m && m[2] ? m[2] : "";
       const link = linkResolver(head);
+      // UniProt/UniRef tail parsing — produces a structured tooltip when
+      // the full header matches one of those formats. Visible label is
+      // unchanged.
+      const parsed = parseUniProtKbHeader(text)
+        || parseUniRefHeader(text)
+        || parseUniParcHeader(text);
+      const tip = parsed
+        ? formatHeaderTip(parsed, link)
+        : (link && link.url ? `${link.label || "open"} → ${link.url}` : null);
       if (link && link.url) {
         const a = document.createElement("a");
         a.className = "msa-dblink";
@@ -1784,12 +1996,27 @@
         a.target = "_blank";
         a.rel = "noopener noreferrer";
         a.textContent = head;
-        a.dataset.tip = `${link.label || "open"} → ${link.url}`;
+        if (tip) a.dataset.tip = tip;
         target.appendChild(a);
       } else {
         const span = document.createElement("span");
         span.textContent = head;
+        if (tip) span.dataset.tip = tip;
         target.appendChild(span);
+      }
+      // Twin-icon affordances: small chips after the head linking to the
+      // canonical entry pages (UniProt entry, AFDB for UniRef rep, …).
+      // Replaces the need for a hidden Shift+Click gesture.
+      const secondaries = secondaryHeaderLinks(parsed, link);
+      for (const s of secondaries) {
+        const chip = document.createElement("a");
+        chip.className = "msa-dblink-sec";
+        chip.href = s.url;
+        chip.target = "_blank";
+        chip.rel = "noopener noreferrer";
+        chip.textContent = s.label;
+        if (s.tip) chip.dataset.tip = s.tip;
+        target.appendChild(chip);
       }
       if (tail) {
         const rest = document.createElement("span");
