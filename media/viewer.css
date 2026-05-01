@@ -291,6 +291,9 @@ html, body {
   grid-template-columns: var(--msa-label-width, 12rem) 1fr;
   min-width: max-content;
   border-bottom: 1px solid var(--bio-border);
+  /* Scoped layout/style — style recalc and reflow stay inside the row
+   * subtree instead of rippling into siblings on every scroll redraw. */
+  contain: layout style;
 }
 
 /* Virtual list of hit rows. Height set in JS = filtered.length × rh.
@@ -298,6 +301,9 @@ html, body {
  * near the viewport are present in the DOM. */
 .static-msa-list {
   position: relative;
+  /* Hint to put the scrolling subtree on its own compositor layer so the
+   * browser can scroll on the GPU without re-painting siblings. */
+  will-change: transform;
 }
 
 .static-msa-list > .static-msa-row {

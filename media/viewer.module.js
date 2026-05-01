@@ -996,11 +996,29 @@
         });
       }
 
+      // Incremental virtualization. liveRows tracks the DOM elements
+      // currently in the list, keyed by their index in `filtered`.
+      // Each scroll tick: remove rows that left the viewport, add rows
+      // that entered. Rows still in viewport are untouched.
+      //
+      // liveRowsKey invalidates the entire pool when something changes
+      // that affects every row (filter / query toggle / inserts /
+      // font size).
+      const liveRows = new Map();
+      let liveRowsKey = null;
+
       function drawList(insertWidths) {
         if (insertWidths === undefined) insertWidths = getInsertWidths();
         const filtered = getFiltered();
         const rh = rowHeight();
         list.style.height = `${filtered.length * rh}px`;
+
+        const newKey = `${state.filter}|${state.firstRowIsQuery}|${state.showInserts}|${state.fontPx}`;
+        if (newKey !== liveRowsKey) {
+          list.innerHTML = "";
+          liveRows.clear();
+          liveRowsKey = newKey;
+        }
 
         const listOffsetTop = list.offsetTop;
         const viewportH = table.clientHeight;
@@ -1013,12 +1031,24 @@
           Math.ceil((visibleTop + visibleHeight) / rh) + VLIST_OVERSCAN,
         );
 
-        list.innerHTML = "";
-        const fragment = document.createDocumentFragment();
-        for (let i = startRow; i < endRow; i++) {
-          fragment.appendChild(buildVirtualRow(filtered[i], i * rh, insertWidths));
+        // Remove rows that scrolled out of the viewport.
+        for (const [idx, el] of liveRows) {
+          if (idx < startRow || idx >= endRow) {
+            el.remove();
+            liveRows.delete(idx);
+          }
         }
-        list.appendChild(fragment);
+
+        // Add rows that just entered the viewport.
+        let toAdd = null;
+        for (let i = startRow; i < endRow; i++) {
+          if (liveRows.has(i)) continue;
+          const row = buildVirtualRow(filtered[i], i * rh, insertWidths);
+          liveRows.set(i, row);
+          if (!toAdd) toAdd = document.createDocumentFragment();
+          toAdd.appendChild(row);
+        }
+        if (toAdd) list.appendChild(toAdd);
 
         const total = state.firstRowIsQuery ? hits.length : viewer.entries.length;
         const f = filtered.length;
@@ -2635,7 +2665,17 @@
         : "";
     }
 
-    function renderSequence(container, entry, insertWidths) {
+    // Per-entry sequence-HTML cache. The HTML for a row depends only on
+    // its own matchSeq + inserts and the global showInserts flag (a row
+    // either includes insert columns or it doesn't). Building the string
+    // is the dominant per-scroll cost; caching it makes the second and
+    // later renders of the same row a single innerHTML assignment.
+    //
+    // Cache key on the entry: { with: html, without: html }. WeakMap so
+    // entries that get GC'd take their cache with them.
+    const sequenceHtmlCache = new WeakMap();
+
+    function buildSequenceHtml(entry, insertWidths) {
       const matchSeq = entry.matchSeq || "";
       const inserts = entry.inserts || {};
       let out = "";
@@ -2648,7 +2688,23 @@
       } else {
         for (let i = 0; i < matchSeq.length; i++) out += matchHtml(matchSeq[i], i);
       }
-      container.innerHTML = out;
+      return out;
+    }
+
+    function renderSequence(container, entry, insertWidths) {
+      const key = insertWidths ? "with" : "without";
+      let cache = sequenceHtmlCache.get(entry);
+      if (cache && cache[key] !== undefined) {
+        container.innerHTML = cache[key];
+        return;
+      }
+      const html = buildSequenceHtml(entry, insertWidths);
+      if (!cache) {
+        cache = {};
+        sequenceHtmlCache.set(entry, cache);
+      }
+      cache[key] = html;
+      container.innerHTML = html;
     }
 
     function matchHtml(ch, colIdx) {
