@@ -73,9 +73,13 @@ export class MsaViewerProvider implements vscode.CustomTextEditorProvider {
     const moduleUri = mediaUri("viewer.module.js");
     const adapterUri = mediaUri("viewer.adapter.js");
     const nonce = newNonce();
+    // 'unsafe-inline' on style-src is required for the per-cell inline
+     // `style="..."` attributes the renderer emits via innerHTML batching
+     // (histogram bar heights, conservation tints, ruler/insert widths).
+     // Scripts stay nonce-locked; only style is loosened.
     const csp = [
       `default-src 'none'`,
-      `style-src ${webview.cspSource}`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
       `script-src 'nonce-${nonce}'`,
       `font-src ${webview.cspSource}`,
     ].join("; ");

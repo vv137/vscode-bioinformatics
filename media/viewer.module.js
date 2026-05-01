@@ -396,6 +396,7 @@
     if (typeof state.msaTemplatesMode !== "boolean") state.msaTemplatesMode = false;
     if (typeof state.msaCoverColor !== "string") state.msaCoverColor = COVER_COLOR_DEFAULT;
     if (!VALID_COVER_COLORS.has(state.msaCoverColor)) state.msaCoverColor = COVER_COLOR_DEFAULT;
+    if (typeof state.firstRowIsQuery !== "boolean") state.firstRowIsQuery = true;
     state.fontPx = clamp(state.fontPx, FONT_MIN, FONT_MAX);
     state.histPx = clamp(state.histPx, HIST_MIN, HIST_MAX);
     state.labelWidth = clamp(state.labelWidth, LABEL_MIN, LABEL_MAX);
@@ -553,8 +554,10 @@
       const blosumStr = info.blosum == null
         ? "—"
         : `${info.blosum.toFixed(2)} (norm ${info.consBlosum.toFixed(2)})`;
+      // The query residue at this column is visible in the sticky query
+      // row above, so we don't repeat it here.
       const head =
-        `col ${idx + 1} · query = ${info.queryRes}\n` +
+        `col ${idx + 1}\n` +
         `coverage: ${info.nonGap} / ${info.total} (${cov.toFixed(1)}%)\n` +
         `entropy: ${info.entropy.toFixed(2)} nats (N_eff = ${Math.exp(info.entropy).toFixed(2)}, cons ${consE})\n` +
         `BLOSUM62 SP: ${blosumStr}`;
@@ -643,6 +646,7 @@
       const coverage = computeCoverage(viewer.entries, viewer.matchLen);
       const meanH = meanHammingToQuery(viewer.entries, query, viewer.matchLen);
       currentColumnInfo = computeColumnInfo(viewer, query);
+      let currentRowStats = computeRowStats(viewer, query, state.firstRowIsQuery);
       const stats = {
         seqLen: query.matchSeq.replace(/[-.]/g, "").length,
         depth: viewer.entries.length,
@@ -797,6 +801,29 @@
         state.msaTemplatesMode = false;
       }
 
+      // "First row = query" — when checked, row 0 is the reference for
+      // Hamming and BLOSUM62 stats in row tooltips. Uncheck to drop
+      // query-relative stats everywhere (e.g. when no row is the query).
+      const queryToggleLabel = document.createElement("label");
+      queryToggleLabel.className = "msa-checkbox-toggle";
+      const queryToggleInput = document.createElement("input");
+      queryToggleInput.type = "checkbox";
+      queryToggleInput.checked = state.firstRowIsQuery;
+      queryToggleLabel.appendChild(queryToggleInput);
+      queryToggleLabel.appendChild(document.createTextNode(" first = query"));
+      queryToggleLabel.dataset.tip =
+        "Treat the first row as query.\n" +
+        "When checked: row tooltips on the other rows show Hamming and " +
+        "BLOSUM62 distance to the query; the query row's own row tooltip " +
+        "skips those (self-comparison).\n" +
+        "Uncheck to hide query-relative stats everywhere.";
+      on(queryToggleInput, "change", () => {
+        state.firstRowIsQuery = queryToggleInput.checked;
+        persist();
+        currentRowStats = computeRowStats(viewer, query, state.firstRowIsQuery);
+        drawAll();
+      });
+
       const fullBtn = makeBtn("msa-fullscreen-btn", "");
       fullBtn.title = "Full screen";
       fullBtn.setAttribute("aria-label", "Full screen");
@@ -826,6 +853,7 @@
       controls.appendChild(gotoInput);
       if (toggleBtn) controls.appendChild(toggleBtn);
       if (templatesBtn) controls.appendChild(templatesBtn);
+      controls.appendChild(queryToggleLabel);
       controls.appendChild(statsEl);
       controls.appendChild(paletteSel);
       controls.appendChild(zoomOut);
@@ -879,10 +907,11 @@
       }
 
       function getFiltered() {
+        const source = state.firstRowIsQuery ? hits : viewer.entries;
         const needle = state.filter.toLowerCase();
         return needle
-          ? hits.filter((h) => (h.name || h.id || "").toLowerCase().includes(needle))
-          : hits;
+          ? source.filter((h) => (h.name || h.id || "").toLowerCase().includes(needle))
+          : source;
       }
 
       function getInsertWidths() {
@@ -918,7 +947,12 @@
           state.msaCoverColor,
           cycleCoverColor,
         );
-        renderRow(table, query, "static-msa-query", insertWidths);
+        // Pin the query row at the top only when the user has confirmed
+        // row 0 (or whatever's marked isQuery) actually is the query.
+        // Otherwise it flows into the virtualized list with the rest.
+        if (state.firstRowIsQuery) {
+          renderRow(table, query, "static-msa-query", insertWidths, currentRowStats);
+        }
         table.appendChild(list);
         drawList(insertWidths);
       }
@@ -986,7 +1020,7 @@
         }
         list.appendChild(fragment);
 
-        const total = hits.length;
+        const total = state.firstRowIsQuery ? hits.length : viewer.entries.length;
         const f = filtered.length;
         const startIdx = f === 0 ? 0 : startRow + 1;
         const endIdx = Math.min(endRow, f);
@@ -1009,13 +1043,17 @@
         label.className = "static-msa-label";
         const nameText = entry.name || entry.id || "";
         renderLinkedHeader(label, nameText, { entry });
-        label.title = nameText;
+        decorateRowLabel(label, entry, nameText);
         const body = document.createElement("span");
         body.className = "static-msa-seq";
         renderSequence(body, entry, insertWidths);
         row.appendChild(label);
         row.appendChild(body);
         return row;
+      }
+
+      function decorateRowLabel(label, entry, nameText) {
+        decorateRowLabelImpl(label, entry, nameText, currentRowStats);
       }
 
       let scrollPending = false;
@@ -2238,6 +2276,63 @@
       return counts.map((c) => c / n);
     }
 
+    // Per-row aggregate stats — surfaced in the row-label tooltip and as
+    // an inline coverage glyph. Computed once per renderInstance.
+    //   portion = non-gap residues / matchLen
+    //   hamming = positions where row differs from query (either side
+    //             non-gap counts as a position)
+    //   blosum  = mean BLOSUM62 score over positions where both row and
+    //             query have recognized AAs
+    // Hamming and blosum are null on the query row itself, and across
+    // all rows when `queryEnabled` is false.
+    function computeRowStats(viewer, query, queryEnabled) {
+      const L = viewer.matchLen;
+      const stats = new Map();
+      const qSeq = query ? query.matchSeq : "";
+      for (const e of viewer.entries) {
+        const seq = e.matchSeq || "";
+        let nonGap = 0;
+        let cmpPositions = 0;
+        let hamming = 0;
+        let blosumSum = 0;
+        let blosumCount = 0;
+        const compareToQuery = queryEnabled && query && e !== query;
+        for (let i = 0; i < L; i++) {
+          const c = seq[i];
+          const isResC = c && c !== "-" && c !== ".";
+          if (isResC) nonGap++;
+          if (!compareToQuery) continue;
+          const qc = qSeq[i];
+          const isResQ = qc && qc !== "-" && qc !== ".";
+          if (isResC || isResQ) {
+            cmpPositions++;
+            if (c !== qc) hamming++;
+          }
+          if (isResC && isResQ) {
+            const upperC = c >= "a" && c <= "z" ? String.fromCharCode(c.charCodeAt(0) - 32) : c;
+            const upperQ = qc >= "a" && qc <= "z" ? String.fromCharCode(qc.charCodeAt(0) - 32) : qc;
+            const ic = BLOSUM62_INDEX.get(upperC);
+            const iq = BLOSUM62_INDEX.get(upperQ);
+            if (ic !== undefined && iq !== undefined) {
+              blosumSum += BLOSUM62_ROWS[iq][ic];
+              blosumCount++;
+            }
+          }
+        }
+        stats.set(e, {
+          portion: L > 0 ? nonGap / L : 0,
+          nonGap,
+          matchLen: L,
+          hamming: compareToQuery ? hamming : null,
+          cmpPositions: compareToQuery ? cmpPositions : null,
+          blosumMean: compareToQuery && blosumCount > 0 ? blosumSum / blosumCount : null,
+          blosumCount: compareToQuery ? blosumCount : null,
+          isQuery: queryEnabled && query ? e === query : false,
+        });
+      }
+      return stats;
+    }
+
     function computeColumnInfo(viewer, query) {
       const L = viewer.matchLen;
       const N = viewer.entries.length;
@@ -2325,7 +2420,42 @@
       return widths;
     }
 
-    function renderRow(parent, entry, extraClass, insertWidths) {
+    // Adds the inline coverage glyph at the left of the label and a
+    // structured row tooltip (name + portion + Hamming + BLOSUM62 vs
+    // query). When `rowStats` is missing or doesn't have an entry, the
+    // tooltip falls back to the raw name (no glyph).
+    function decorateRowLabelImpl(label, entry, nameText, rowStats) {
+      const stats = rowStats ? rowStats.get(entry) : null;
+      if (!stats) {
+        label.title = nameText;
+        return;
+      }
+      const glyph = document.createElement("span");
+      glyph.className = "msa-row-glyph";
+      glyph.style.setProperty("--p", String(stats.portion));
+      label.prepend(glyph);
+      label.dataset.tip = formatRowTip(entry, stats, nameText);
+    }
+
+    function formatRowTip(entry, stats, nameText) {
+      const lines = [nameText];
+      const pct = (stats.portion * 100).toFixed(1);
+      lines.push(`residue portion: ${stats.nonGap} / ${stats.matchLen} (${pct}%)`);
+      if (stats.isQuery) {
+        lines.push("(query row — Hamming / BLOSUM62 are self-comparisons, skipped)");
+      } else if (stats.hamming != null) {
+        const hPct = stats.cmpPositions > 0
+          ? (stats.hamming / stats.cmpPositions * 100).toFixed(1)
+          : "—";
+        lines.push(`Hamming to query: ${stats.hamming} / ${stats.cmpPositions} (${hPct}%)`);
+      }
+      if (stats.blosumMean != null) {
+        lines.push(`BLOSUM62 vs query: ${stats.blosumMean.toFixed(2)} (mean over ${stats.blosumCount} aligned AAs)`);
+      }
+      return lines.join("\n");
+    }
+
+    function renderRow(parent, entry, extraClass, insertWidths, rowStats) {
       const row = document.createElement("div");
       row.className = "static-msa-row";
       if (extraClass) row.classList.add(extraClass);
@@ -2333,7 +2463,7 @@
       label.className = "static-msa-label";
       const nameText = entry.name || entry.id || "";
       renderLinkedHeader(label, nameText, { entry });
-      label.title = nameText;
+      decorateRowLabelImpl(label, entry, nameText, rowStats);
       const body = document.createElement("span");
       body.className = "static-msa-seq";
       renderSequence(body, entry, insertWidths);
@@ -2484,13 +2614,17 @@
 
     function barHtml(frac, total, colIdx, cons) {
       const colAttr = colIdx != null ? ` data-col="${colIdx}"` : "";
-      let style = frac > 0 ? `height:max(1px, ${(frac * 100).toFixed(2)}%)` : "height:0";
-      // Conservation tint: light blue at low conservation, saturated blue
-      // at high. Alpha runs 0.25 → 0.9 so even uniform columns stay
-      // visible against the panel background.
+      // Avoid CSS `max()` and `rgba(R, G, B, A)` inside inline-style
+      // attribute values — both contain commas, which some webview/CSS
+      // pipelines silently mis-parse, dropping the entire declaration
+      // and leaving bars invisible.
+      // - Floor height in JS (Math.max), emit a plain percentage.
+      // - Use space-separated `rgb(R G B / A)` for the conservation tint.
+      const h = frac > 0 ? Math.max(2, frac * 100) : 0;
+      let style = `height:${h.toFixed(2)}%`;
       if (cons != null) {
         const a = (0.25 + 0.65 * cons).toFixed(3);
-        style += `;background:rgba(70,130,230,${a});opacity:1`;
+        style += `;background-color:rgb(70 130 230 / ${a});opacity:1`;
       }
       return `<span class="msa-histogram-cell"${colAttr}><span class="msa-histogram-bar" style="${style}"></span></span>`;
     }

@@ -100,11 +100,40 @@ html, body {
   border-bottom: 1px solid var(--bio-border);
   background: var(--bio-panel);
   font-family: var(--vscode-font-family);
+  /* On narrow tabs the bar would otherwise overflow horizontally and
+   * clip controls (or push the alignment grid out of view). Allow
+   * horizontal scrolling and keep children at their natural width. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+}
+
+.static-msa-controls > * {
+  flex-shrink: 0;
+}
+
+/* Subtle scrollbar so it doesn't dominate the controls bar. */
+.static-msa-controls::-webkit-scrollbar {
+  height: 6px;
+}
+.static-msa-controls::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, rgba(120, 120, 120, 0.3));
+  border-radius: 3px;
+}
+.static-msa-controls::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, rgba(120, 120, 120, 0.5));
 }
 
 .static-msa-table {
   flex: 1 1 auto;
   overflow: auto;
+  /* Without these the flex item refuses to shrink below its intrinsic
+   * content size — the alignment grid is wider than the viewport, so
+   * the table grows past the wrapper, pushing the histogram and other
+   * sticky rows off-screen. */
+  min-height: 0;
+  min-width: 0;
 }
 
 .msa-page-btn,
@@ -367,7 +396,10 @@ html, body {
   display: inline-block;
   position: relative;
   width: 1ch;
-  height: 100%;
+  /* Use the same explicit height as the body — `height: 100%` here
+   * relied on a percentage chain through a grid item that was collapsing
+   * to 0 in some layouts, leaving bars invisible despite valid styles. */
+  height: var(--msa-hist-height, 26px);
   vertical-align: bottom;
   /* Cell width tracks zoom so bars stay aligned to residue columns. */
   font-size: var(--msa-font-size, 10px);
@@ -399,6 +431,55 @@ html, body {
 .msa-histogram-color-btn[aria-pressed="true"] {
   color: var(--bio-accent);
   border-color: rgba(70, 130, 230, 0.35);
+}
+
+/* Inline progress-bar glyph at the left of each row label — visual cue
+ * for residue portion (1 - gap fraction). Sits before the head text so
+ * it stays visible even when the label clips long names with ellipsis.
+ * The fill width is driven by --p (0..1). */
+.msa-row-glyph {
+  display: inline-block;
+  width: 18px;
+  height: 6px;
+  margin-right: 0.3rem;
+  border: 1px solid var(--bio-border);
+  border-radius: 1px;
+  background: transparent;
+  position: relative;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.msa-row-glyph::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(100% * var(--p, 0));
+  background: var(--bio-accent);
+  opacity: 0.55;
+}
+
+/* Compact checkbox toggle for the controls bar (e.g. "first = query").
+ * Smaller than a button, larger hit target than a bare checkbox. */
+.msa-checkbox-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.35rem;
+  font-family: var(--vscode-font-family);
+  font-size: 0.85em;
+  color: var(--bio-fg);
+  cursor: pointer;
+  user-select: none;
+  border-radius: 2px;
+}
+.msa-checkbox-toggle:hover {
+  background: var(--vscode-list-hoverBackground, transparent);
+}
+.msa-checkbox-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
 }
 
 .msa-histogram-insert {
