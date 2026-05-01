@@ -19,10 +19,17 @@ html, body {
   color: var(--bio-fg);
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
+  /* Pin the document to the viewport — the viewer owns its own scroll
+   * regions, so the page itself should never scroll. Without this a
+   * 1-2 px rounding overflow produces a near-full-track outer scrollbar. */
+  height: 100vh;
+  overflow: hidden;
 }
 
 #msa-viewer-container {
   padding: 0.5rem;
+  box-sizing: border-box;
+  height: 100vh;
 }
 
 .msa-error {
@@ -71,7 +78,10 @@ html, body {
   font-size: var(--vscode-font-size);
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 1rem);
+  /* Fill the padded container exactly. box-sizing keeps the 1px border
+   * inside the height so the page doesn't overflow. */
+  height: 100%;
+  box-sizing: border-box;
   overflow: hidden;
 }
 

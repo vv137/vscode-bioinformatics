@@ -63,6 +63,21 @@
   const BLOSUM62_NORM_LO = -2;
   const BLOSUM62_NORM_HI = 6;
   const LN20 = Math.log(20);
+
+  // Per-row HTML batching. Building hundreds of cells via createElement +
+  // appendChild is the dominant cost when rendering wide alignments;
+  // assembling one HTML string per row and assigning innerHTML once is
+  // 3–5× faster. Residue chars in our inputs are ASCII letters / `-` /
+  // `.` / `*` / `?` / digits — none need escaping in practice — but we
+  // escape defensively so a stray `<` or `&` in a synthetic track can't
+  // inject markup.
+  const HTML_ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+  function htmlEscape(s) {
+    return /[&<>"]/.test(s) ? String(s).replace(/[&<>"]/g, (c) => HTML_ESC_MAP[c]) : String(s);
+  }
+  function htmlEscapeChar(ch) {
+    return HTML_ESC_MAP[ch] || ch;
+  }
   /** breakAfter = 0 → auto-fit to window width on every resize. Manual
    *  override clamps to [_MIN, _MAX]. */
   const BREAK_AFTER_MIN = 30;
@@ -392,6 +407,28 @@
 
     // Per-column info populated by load() and read by the tooltip handler.
     let currentColumnInfo = null;
+
+    // Per-entry memo for header parsing + link resolution. The same
+    // header is rendered on every scroll-driven row redraw, so caching
+    // the regex+resolver work eliminates a lot of string scanning.
+    // Keyed by entry; invalidated when the cached `text` differs.
+    const headerCache = new WeakMap();
+    function getHeaderInfo(entry, text) {
+      if (entry) {
+        const c = headerCache.get(entry);
+        if (c && c.text === text) return c;
+      }
+      const m = /^(\S+)(\s.*)?$/.exec(text);
+      const head = m ? m[1] : text;
+      const tail = m && m[2] ? m[2] : "";
+      const link = linkResolver(head);
+      const parsed = parseUniProtKbHeader(text)
+        || parseUniRefHeader(text)
+        || parseUniParcHeader(text);
+      const info = { text, head, tail, link, parsed };
+      if (entry) headerCache.set(entry, info);
+      return info;
+    }
 
     // Error display lives inside the container so the module owns its DOM.
     container.innerHTML = "";
@@ -971,7 +1008,7 @@
         const label = document.createElement("span");
         label.className = "static-msa-label";
         const nameText = entry.name || entry.id || "";
-        renderLinkedHeader(label, nameText);
+        renderLinkedHeader(label, nameText, { entry });
         label.title = nameText;
         const body = document.createElement("span");
         body.className = "static-msa-seq";
@@ -989,7 +1026,7 @@
           scrollPending = false;
           drawList();
         });
-      });
+      }, { passive: true });
 
       on(prevBtn, "click", () => {
         table.scrollBy({ top: -table.clientHeight + 50, behavior: "smooth" });
@@ -1006,6 +1043,28 @@
         drawList();
       });
       on(window, "resize", () => drawList());
+
+      // Catches the case where this webview was hidden (clientHeight = 0,
+      // virtualized list rendered an empty viewport) and is now visible
+      // again — neither `scroll` nor `window.resize` fires for that, so
+      // without this the alignment renders tiny until the user touches
+      // it. Coalesced via rAF.
+      let observePending = false;
+      const tableObserver = typeof ResizeObserver === "function"
+        ? new ResizeObserver(() => {
+            if (observePending) return;
+            observePending = true;
+            requestAnimationFrame(() => {
+              observePending = false;
+              drawList();
+              syncLabelResizeTop();
+            });
+          })
+        : null;
+      if (tableObserver) {
+        tableObserver.observe(table);
+        disposers.push(() => tableObserver.disconnect());
+      }
 
       function syncLabelResizeTop() {
         labelResize.style.top = `${controls.offsetHeight}px`;
@@ -1914,36 +1973,28 @@
     }
 
     function renderHhrSeqInline(container, slice, kind) {
-      const fragment = document.createDocumentFragment();
       // ss tracks: each char = h/H/e/E/c/C → distinct color via msa-ss-* class.
       // agree / confidence / pp: plain text in a single span.
       // seq / consensus: per-residue spans (palette, hover, etc. apply).
+      let out = "";
       if (kind === "seq" || kind === "consensus") {
         for (let i = 0; i < slice.length; i++) {
           const ch = slice[i];
-          const cell = document.createElement("span");
-          cell.className = `msa-residue msa-aa-${residueClass(ch)}`;
-          cell.textContent = ch;
-          const code = ch.toUpperCase();
-          if (code >= "A" && code <= "Z") cell.dataset.aa = code;
-          fragment.appendChild(cell);
+          const cls = residueClass(ch);
+          const upper = ch >= "a" && ch <= "z" ? String.fromCharCode(ch.charCodeAt(0) - 32) : ch;
+          const aa = (upper >= "A" && upper <= "Z") ? ` data-aa="${upper}"` : "";
+          out += `<span class="msa-residue msa-aa-${cls}"${aa}>${htmlEscapeChar(ch)}</span>`;
         }
       } else if (kind === "ss") {
         for (let i = 0; i < slice.length; i++) {
           const ch = slice[i];
-          const cell = document.createElement("span");
-          cell.className = `msa-residue msa-ss-${ssClass(ch)}`;
-          cell.textContent = ch;
-          fragment.appendChild(cell);
+          out += `<span class="msa-residue msa-ss-${ssClass(ch)}">${htmlEscapeChar(ch)}</span>`;
         }
       } else {
         // agree / confidence / pp — plain monospace block
-        const span = document.createElement("span");
-        span.className = `hhr-plain hhr-plain-${kind}`;
-        span.textContent = slice;
-        fragment.appendChild(span);
+        out = `<span class="hhr-plain hhr-plain-${kind}">${htmlEscape(slice)}</span>`;
       }
-      container.appendChild(fragment);
+      container.innerHTML = out;
     }
 
     function ssClass(ch) {
@@ -1976,16 +2027,12 @@
     function renderLinkedHeader(target, text, opts2 = {}) {
       target.textContent = "";
       if (!text) return;
-      const m = /^(\S+)(\s.*)?$/.exec(text);
-      const head = m ? m[1] : text;
-      const tail = m && m[2] ? m[2] : "";
-      const link = linkResolver(head);
-      // UniProt/UniRef tail parsing — produces a structured tooltip when
-      // the full header matches one of those formats. Visible label is
-      // unchanged.
-      const parsed = parseUniProtKbHeader(text)
-        || parseUniRefHeader(text)
-        || parseUniParcHeader(text);
+      // Pulls head / tail / link / parsed from the per-entry cache when
+      // an entry is provided (typical for MSA row labels), or computes
+      // them inline for one-off call sites (HHR descriptions, template
+      // table cells).
+      const info = getHeaderInfo(opts2.entry, text);
+      const { head, tail, link, parsed } = info;
       const tip = parsed
         ? formatHeaderTip(parsed, link)
         : (link && link.url ? `${link.label || "open"} → ${link.url}` : null);
@@ -2285,7 +2332,7 @@
       const label = document.createElement("span");
       label.className = "static-msa-label";
       const nameText = entry.name || entry.id || "";
-      renderLinkedHeader(label, nameText);
+      renderLinkedHeader(label, nameText, { entry });
       label.title = nameText;
       const body = document.createElement("span");
       body.className = "static-msa-seq";
@@ -2359,7 +2406,6 @@
 
       const body = document.createElement("span");
       body.className = "static-msa-seq";
-      const fragment = document.createDocumentFragment();
       const consAt = (i) => {
         if (!useColor) return null;
         const c = columnInfo[i];
@@ -2367,16 +2413,17 @@
         const v = c[colorKey];
         return typeof v === "number" ? v : null;
       };
+      let out = "";
       if (insertWidths) {
-        emitInsertGap(fragment, insertWidths[0] || 0);
+        out += histInsertGapHtml(insertWidths[0] || 0);
         for (let i = 0; i < coverage.length; i++) {
-          emitBar(fragment, coverage[i], total, i, consAt(i));
-          emitInsertGap(fragment, insertWidths[i + 1] || 0);
+          out += barHtml(coverage[i], total, i, consAt(i));
+          out += histInsertGapHtml(insertWidths[i + 1] || 0);
         }
       } else {
-        for (let i = 0; i < coverage.length; i++) emitBar(fragment, coverage[i], total, i, consAt(i));
+        for (let i = 0; i < coverage.length; i++) out += barHtml(coverage[i], total, i, consAt(i));
       }
-      body.appendChild(fragment);
+      body.innerHTML = out;
 
       const resizer = document.createElement("div");
       resizer.className = "msa-histogram-resize";
@@ -2408,108 +2455,91 @@
         }
       }
 
-      const fragment = document.createDocumentFragment();
+      let out = "";
       if (insertWidths) {
-        emitRulerInsertGap(fragment, insertWidths[0] || 0);
+        out += rulerInsertGapHtml(insertWidths[0] || 0);
         for (let i = 0; i < matchLen; i++) {
-          emitRulerCell(fragment, cells[i], ticks.has(i));
-          emitRulerInsertGap(fragment, insertWidths[i + 1] || 0);
+          out += rulerCellHtml(cells[i], ticks.has(i));
+          out += rulerInsertGapHtml(insertWidths[i + 1] || 0);
         }
       } else {
-        for (let i = 0; i < matchLen; i++) emitRulerCell(fragment, cells[i], ticks.has(i));
+        for (let i = 0; i < matchLen; i++) out += rulerCellHtml(cells[i], ticks.has(i));
       }
-      body.appendChild(fragment);
+      body.innerHTML = out;
       row.appendChild(label);
       row.appendChild(body);
       parent.appendChild(row);
     }
 
-    function emitRulerCell(parent, ch, isTick) {
-      const cell = document.createElement("span");
-      cell.className = isTick ? "msa-ruler-cell msa-ruler-tick" : "msa-ruler-cell";
-      cell.textContent = ch;
-      parent.appendChild(cell);
+    function rulerCellHtml(ch, isTick) {
+      const cls = isTick ? "msa-ruler-cell msa-ruler-tick" : "msa-ruler-cell";
+      return `<span class="${cls}">${htmlEscapeChar(ch)}</span>`;
     }
 
-    function emitRulerInsertGap(parent, width) {
-      if (width <= 0) return;
-      const cell = document.createElement("span");
-      cell.className = "msa-ruler-cell msa-ruler-insert";
-      cell.style.width = `${width}ch`;
-      parent.appendChild(cell);
+    function rulerInsertGapHtml(width) {
+      return width > 0
+        ? `<span class="msa-ruler-cell msa-ruler-insert" style="width:${width}ch"></span>`
+        : "";
     }
 
-    function emitBar(parent, frac, total, colIdx, cons) {
-      const cell = document.createElement("span");
-      cell.className = "msa-histogram-cell";
-      if (colIdx != null) cell.dataset.col = String(colIdx);
-      const bar = document.createElement("span");
-      bar.className = "msa-histogram-bar";
-      bar.style.height = frac > 0 ? `max(1px, ${(frac * 100).toFixed(2)}%)` : "0";
+    function barHtml(frac, total, colIdx, cons) {
+      const colAttr = colIdx != null ? ` data-col="${colIdx}"` : "";
+      let style = frac > 0 ? `height:max(1px, ${(frac * 100).toFixed(2)}%)` : "height:0";
       // Conservation tint: light blue at low conservation, saturated blue
       // at high. Alpha runs 0.25 → 0.9 so even uniform columns stay
       // visible against the panel background.
       if (cons != null) {
-        const a = 0.25 + 0.65 * cons;
-        bar.style.background = `rgba(70, 130, 230, ${a.toFixed(3)})`;
-        bar.style.opacity = "1";
+        const a = (0.25 + 0.65 * cons).toFixed(3);
+        style += `;background:rgba(70,130,230,${a});opacity:1`;
       }
-      cell.appendChild(bar);
-      parent.appendChild(cell);
+      return `<span class="msa-histogram-cell"${colAttr}><span class="msa-histogram-bar" style="${style}"></span></span>`;
     }
 
-    function emitInsertGap(parent, width) {
-      if (width <= 0) return;
-      const cell = document.createElement("span");
-      cell.className = "msa-histogram-cell msa-histogram-insert";
-      cell.style.width = `${width}ch`;
-      parent.appendChild(cell);
+    function histInsertGapHtml(width) {
+      return width > 0
+        ? `<span class="msa-histogram-cell msa-histogram-insert" style="width:${width}ch"></span>`
+        : "";
     }
 
     function renderSequence(container, entry, insertWidths) {
-      const fragment = document.createDocumentFragment();
       const matchSeq = entry.matchSeq || "";
       const inserts = entry.inserts || {};
+      let out = "";
       if (insertWidths) {
-        emitInsert(fragment, inserts[0] || "", insertWidths[0]);
+        out += insertHtml(inserts[0] || "", insertWidths[0]);
         for (let i = 0; i < matchSeq.length; i++) {
-          emitMatch(fragment, matchSeq[i], i);
-          emitInsert(fragment, inserts[i + 1] || "", insertWidths[i + 1] || 0);
+          out += matchHtml(matchSeq[i], i);
+          out += insertHtml(inserts[i + 1] || "", insertWidths[i + 1] || 0);
         }
       } else {
-        for (let i = 0; i < matchSeq.length; i++) emitMatch(fragment, matchSeq[i], i);
+        for (let i = 0; i < matchSeq.length; i++) out += matchHtml(matchSeq[i], i);
       }
-      container.appendChild(fragment);
+      container.innerHTML = out;
     }
 
-    function emitMatch(fragment, ch, colIdx) {
-      const cell = document.createElement("span");
-      cell.className = `msa-residue msa-aa-${residueClass(ch)}`;
-      cell.textContent = ch;
-      const code = String(ch).toUpperCase();
-      if (code >= "A" && code <= "Z") cell.dataset.aa = code;
-      if (colIdx != null) cell.dataset.col = String(colIdx);
-      fragment.appendChild(cell);
+    function matchHtml(ch, colIdx) {
+      const cls = residueClass(ch);
+      const upper = ch >= "a" && ch <= "z" ? String.fromCharCode(ch.charCodeAt(0) - 32) : ch;
+      const aa = (upper >= "A" && upper <= "Z") ? ` data-aa="${upper}"` : "";
+      const col = colIdx != null ? ` data-col="${colIdx}"` : "";
+      return `<span class="msa-residue msa-aa-${cls}"${aa}${col}>${htmlEscapeChar(ch)}</span>`;
     }
 
-    function emitInsert(fragment, text, width) {
-      if (width <= 0) return;
-      for (const ch of text) {
-        const cell = document.createElement("span");
-        cell.className = `msa-residue msa-aa-${residueClass(ch)} msa-insert`;
-        cell.textContent = ch;
-        const code = String(ch).toUpperCase();
-        if (code >= "A" && code <= "Z") cell.dataset.aa = code;
-        fragment.appendChild(cell);
+    function insertHtml(text, width) {
+      if (width <= 0) return "";
+      let out = "";
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        const cls = residueClass(ch);
+        const upper = ch >= "a" && ch <= "z" ? String.fromCharCode(ch.charCodeAt(0) - 32) : ch;
+        const aa = (upper >= "A" && upper <= "Z") ? ` data-aa="${upper}"` : "";
+        out += `<span class="msa-residue msa-aa-${cls} msa-insert"${aa}>${htmlEscapeChar(ch)}</span>`;
       }
       const pad = width - text.length;
       if (pad > 0) {
-        const padCell = document.createElement("span");
-        padCell.className = "msa-residue msa-aa-gap msa-insert msa-insert-pad";
-        padCell.textContent = ".".repeat(pad);
-        padCell.style.width = `${pad}ch`;
-        fragment.appendChild(padCell);
+        out += `<span class="msa-residue msa-aa-gap msa-insert msa-insert-pad" style="width:${pad}ch">${".".repeat(pad)}</span>`;
       }
+      return out;
     }
 
     function residueClass(residue) {
