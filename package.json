@@ -25,7 +25,7 @@
     "blosum62",
     "conservation"
   ],
-  "version": "0.0.9",
+  "version": "0.0.10",
   "publisher": "vv137xyz",
   "engines": {
     "vscode": "^1.85.0"
