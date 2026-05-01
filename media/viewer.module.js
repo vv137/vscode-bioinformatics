@@ -457,6 +457,10 @@
     if (typeof state.msaCoverColor !== "string") state.msaCoverColor = COVER_COLOR_DEFAULT;
     if (!VALID_COVER_COLORS.has(state.msaCoverColor)) state.msaCoverColor = COVER_COLOR_DEFAULT;
     if (typeof state.firstRowIsQuery !== "boolean") state.firstRowIsQuery = true;
+    if (typeof state.scrollTop !== "number" || !isFinite(state.scrollTop)) state.scrollTop = 0;
+    if (typeof state.scrollLeft !== "number" || !isFinite(state.scrollLeft)) state.scrollLeft = 0;
+    state.scrollTop = Math.max(0, state.scrollTop);
+    state.scrollLeft = Math.max(0, state.scrollLeft);
     state.fontPx = clamp(state.fontPx, FONT_MIN, FONT_MAX);
     state.histPx = clamp(state.histPx, HIST_MIN, HIST_MAX);
     state.labelWidth = clamp(state.labelWidth, LABEL_MIN, LABEL_MAX);
@@ -766,11 +770,11 @@
       controls.className = "static-msa-controls";
 
       const prevBtn = makeBtn("msa-page-btn", "↑");
-      prevBtn.dataset.tip = "Page up";
+      prevBtn.dataset.tip = "Page up (PgUp)";
       const pageLabel = document.createElement("span");
       pageLabel.className = "msa-page-label";
       const nextBtn = makeBtn("msa-page-btn", "↓");
-      nextBtn.dataset.tip = "Page down";
+      nextBtn.dataset.tip = "Page down (PgDn / Space)";
 
       const filterInput = document.createElement("input");
       filterInput.type = "search";
@@ -781,6 +785,9 @@
       filterInput.dataset.tip = "Filter by name (Cmd/Ctrl+F)";
       on(filterInput, "input", () => {
         state.filter = filterInput.value.trim();
+        // Filtering reshapes the row list — the saved scroll offset
+        // would land on a different row. Reset to top.
+        state.scrollTop = 0;
         table.scrollTop = 0;
         persist();
         drawAll();
@@ -1166,7 +1173,27 @@
         // the active --msa-font-size, which the wrapper now carries.
         measureCellWidth();
         drawList(insertWidths);
+
+        // Restore the persisted scroll position on first open. Done
+        // after drawList so list.style.height + the row content's
+        // intrinsic width are set — without that, the browser clamps
+        // .scrollTop / .scrollLeft to (0, 0) and the position is lost.
+        // The .scrollTo here fires a scroll event → drawList re-runs
+        // with the correct column window. One wasted render on first
+        // open, but it's the cleanest way to avoid showing wrong
+        // content at the saved position.
+        if (!initialScrollRestored) {
+          initialScrollRestored = true;
+          const wantTop = state.scrollTop || 0;
+          const wantLeft = state.scrollLeft || 0;
+          if (wantTop > 0 || wantLeft > 0) {
+            if (table.scrollTop !== wantTop) table.scrollTop = wantTop;
+            if (table.scrollLeft !== wantLeft) table.scrollLeft = wantLeft;
+          }
+        }
       }
+
+      let initialScrollRestored = false;
 
       function applyMsaMode() {
         // The button click already flipped state; just rebuild.
@@ -1319,7 +1346,19 @@
       }
 
       let scrollPending = false;
+      // Trailing-edge debounce — keep state.scroll* in sync with the
+      // live position on every tick (cheap), but only commit to storage
+      // a moment after the user stops scrolling. Reopening the file
+      // restores the last position; mid-fling persists are wasted I/O.
+      let scrollPersistTimer = 0;
       on(table, "scroll", () => {
+        state.scrollLeft = table.scrollLeft;
+        state.scrollTop = table.scrollTop;
+        if (scrollPersistTimer) clearTimeout(scrollPersistTimer);
+        scrollPersistTimer = setTimeout(() => {
+          scrollPersistTimer = 0;
+          persist();
+        }, 250);
         if (scrollPending) return;
         scrollPending = true;
         requestAnimationFrame(() => {
@@ -1327,6 +1366,9 @@
           drawList();
         });
       }, { passive: true });
+      disposers.push(() => {
+        if (scrollPersistTimer) clearTimeout(scrollPersistTimer);
+      });
 
       on(prevBtn, "click", () => {
         table.scrollBy({ top: -table.clientHeight + 50, behavior: "smooth" });
@@ -1395,6 +1437,7 @@
             if (filterInput.value) {
               filterInput.value = "";
               state.filter = "";
+              state.scrollTop = 0;
               table.scrollTop = 0;
               persist();
               drawAll();
@@ -1410,7 +1453,57 @@
             return;
           }
         }
-        if (tag !== "INPUT" && tag !== "TEXTAREA" && !mod) {
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+        // No-modifier nav. Vim-ish g/G stays alongside Home/End so both
+        // muscle memories work.
+        if (!mod && !ev.shiftKey && !ev.altKey) {
+          // Step sizes: arrows scroll by ~10 cells horizontally / 1 row
+          // vertically, matching what feels like "one motion" in the
+          // residue grid. Cmd/Ctrl-modified arrows below scroll a page.
+          const cw = cellWidthPx > 0 ? cellWidthPx : 8;
+          const stepX = Math.max(8, Math.round(cw * 10));
+          const stepY = rowHeight();
+          if (ev.key === "ArrowLeft") {
+            ev.preventDefault();
+            table.scrollBy({ left: -stepX });
+            return;
+          }
+          if (ev.key === "ArrowRight") {
+            ev.preventDefault();
+            table.scrollBy({ left: stepX });
+            return;
+          }
+          if (ev.key === "ArrowUp") {
+            ev.preventDefault();
+            table.scrollBy({ top: -stepY });
+            return;
+          }
+          if (ev.key === "ArrowDown") {
+            ev.preventDefault();
+            table.scrollBy({ top: stepY });
+            return;
+          }
+          if (ev.key === "PageUp") {
+            ev.preventDefault();
+            table.scrollBy({ top: -table.clientHeight + stepY, behavior: "smooth" });
+            return;
+          }
+          if (ev.key === "PageDown" || ev.key === " ") {
+            ev.preventDefault();
+            table.scrollBy({ top: table.clientHeight - stepY, behavior: "smooth" });
+            return;
+          }
+          if (ev.key === "Home") {
+            ev.preventDefault();
+            table.scrollTo({ left: 0, behavior: "smooth" });
+            return;
+          }
+          if (ev.key === "End") {
+            ev.preventDefault();
+            table.scrollTo({ left: table.scrollWidth, behavior: "smooth" });
+            return;
+          }
           if (ev.key === "g") {
             ev.preventDefault();
             table.scrollTo({ top: 0, behavior: "smooth" });
@@ -1419,6 +1512,34 @@
           if (ev.key === "G") {
             ev.preventDefault();
             table.scrollTo({ top: list.offsetHeight, behavior: "smooth" });
+            return;
+          }
+        }
+
+        // Cmd/Ctrl-modified nav: jump to the four corners + page-width
+        // horizontal scroll. Mirrors VS Code-editor conventions enough
+        // to be intuitive.
+        if (mod && !ev.shiftKey && !ev.altKey) {
+          if (ev.key === "Home") {
+            ev.preventDefault();
+            table.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+            return;
+          }
+          if (ev.key === "End") {
+            ev.preventDefault();
+            table.scrollTo({
+              top: table.scrollHeight, left: table.scrollWidth, behavior: "smooth",
+            });
+            return;
+          }
+          if (ev.key === "ArrowLeft") {
+            ev.preventDefault();
+            table.scrollBy({ left: -table.clientWidth, behavior: "smooth" });
+            return;
+          }
+          if (ev.key === "ArrowRight") {
+            ev.preventDefault();
+            table.scrollBy({ left: table.clientWidth, behavior: "smooth" });
             return;
           }
         }
