@@ -25,6 +25,11 @@
   const LABEL_DEFAULT = 192;
   const LABEL_HIDE_THRESHOLD = 24;
   const VLIST_OVERSCAN = 8;
+  // Horizontal virtualization: extra match-columns rendered on each
+  // side of the visible window. Sized to absorb typical scroll deltas
+  // between two `scroll`-event ticks at moderate fling speeds, so most
+  // horizontal scrolls don't trigger a row rebuild.
+  const COL_OVERSCAN = 64;
   const ROW_LINE_HEIGHT = 1.25;
   const VALID_PALETTES = new Set(["chemical", "clustalx", "taylor", "zappo"]);
   // Coverage histogram coloring: off | entropy | blosum.
@@ -77,6 +82,61 @@
   }
   function htmlEscapeChar(ch) {
     return HTML_ESC_MAP[ch] || ch;
+  }
+
+  // Hoisted to module scope so the precomputed residue-HTML tables
+  // below can reference it. Re-used (via closure capture) inside
+  // `create()` for one-off slow-path calls on non-ASCII residues.
+  function residueClass(residue) {
+    switch (String(residue).toUpperCase()) {
+      case "A": case "I": case "L": case "M":
+      case "F": case "W": case "V":
+        return "hydrophobic";
+      case "D": case "E": return "acidic";
+      case "K": case "R": return "basic";
+      case "H": case "Y": return "aromatic";
+      case "S": case "T": case "N": case "Q": return "polar";
+      case "C": return "cysteine";
+      case "G": return "glycine";
+      case "P": return "proline";
+      case "-": case ".": return "gap";
+      default: return "other";
+    }
+  }
+
+  // Pre-baked per-character HTML for residue cells. Residues are ASCII;
+  // we precompute the full `<span …>X</span>` string once per char code,
+  // for both match and insert variants. matchHtml/insertHtml become a
+  // single array index — no class lookup, no escape, no template-string
+  // interpolation per cell. Hover column lookup no longer relies on
+  // data-col; it walks siblings within the row body and offsets by the
+  // row's recorded colStart (set as a JS expando on the row element).
+  const RESIDUE_HTML_MATCH = new Array(128);
+  const RESIDUE_HTML_INSERT = new Array(128);
+  (function precomputeResidueHtml() {
+    for (let cc = 0; cc < 128; cc++) {
+      const ch = String.fromCharCode(cc);
+      const cls = residueClass(ch);
+      const upper = ch >= "a" && ch <= "z" ? String.fromCharCode(cc - 32) : ch;
+      const aa = (upper >= "A" && upper <= "Z") ? ` data-aa="${upper}"` : "";
+      const escaped = HTML_ESC_MAP[ch] || ch;
+      RESIDUE_HTML_MATCH[cc] = `<span class="msa-residue msa-aa-${cls}"${aa}>${escaped}</span>`;
+      RESIDUE_HTML_INSERT[cc] = `<span class="msa-residue msa-aa-${cls} msa-insert"${aa}>${escaped}</span>`;
+    }
+  })();
+  function matchCellHtml(ch) {
+    const cc = ch.charCodeAt(0);
+    if (cc < 128) return RESIDUE_HTML_MATCH[cc];
+    // Slow path: non-ASCII residue character. Should not happen in real
+    // alignments but we keep it correct.
+    const cls = residueClass(ch);
+    return `<span class="msa-residue msa-aa-${cls}">${htmlEscapeChar(ch)}</span>`;
+  }
+  function insertCellHtml(ch) {
+    const cc = ch.charCodeAt(0);
+    if (cc < 128) return RESIDUE_HTML_INSERT[cc];
+    const cls = residueClass(ch);
+    return `<span class="msa-residue msa-aa-${cls} msa-insert">${htmlEscapeChar(ch)}</span>`;
   }
   /** breakAfter = 0 → auto-fit to window width on every resize. Manual
    *  override clamps to [_MIN, _MAX]. */
@@ -503,11 +563,50 @@
     }
 
     // ---- tooltip wiring (scoped to container; document for blur) ----
+    //
+    // Three tooltip sources, in priority order:
+    //   1. data-tip="..." anywhere — explicit string.
+    //   2. data-col="N" on histogram bars — col-info card.
+    //   3. .msa-residue match cells inside a row — col-info card,
+    //      derived from the row's recorded _colStart + sibling count.
+    //      Match cells no longer carry data-col; computing on demand
+    //      saves ~10 bytes per cell across thousands of cells per row.
+    function residueColTarget(node) {
+      if (!node || !node.classList) return null;
+      if (!node.classList.contains("msa-residue")) return null;
+      if (node.classList.contains("msa-insert")) return null;
+      if (node.classList.contains("msa-spacer")) return null;
+      return node;
+    }
+    function colForResidue(cell) {
+      const row = cell.closest(".static-msa-row");
+      if (!row || row._colStart == null) return -1;
+      let count = 0;
+      let prev = cell.previousElementSibling;
+      while (prev) {
+        if (prev.classList.contains("msa-residue") &&
+            !prev.classList.contains("msa-insert") &&
+            !prev.classList.contains("msa-spacer")) {
+          count++;
+        }
+        prev = prev.previousElementSibling;
+      }
+      return row._colStart + count;
+    }
     on(container, "mouseover", (ev) => {
-      const t = ev.target.closest("[data-tip], [data-col]");
+      const t = ev.target.closest("[data-tip], [data-col], .msa-residue");
       if (!t || !container.contains(t)) return;
-      let text = t.dataset.tip;
-      if (!text && t.dataset.col != null) text = formatColInfo(+t.dataset.col);
+      let text = t.dataset && t.dataset.tip;
+      if (!text && t.dataset && t.dataset.col != null) {
+        text = formatColInfo(+t.dataset.col);
+      }
+      if (!text) {
+        const residue = residueColTarget(t);
+        if (residue) {
+          const col = colForResidue(residue);
+          if (col >= 0) text = formatColInfo(col);
+        }
+      }
       if (!text) return;
       tipEl.textContent = text;
       tipEl.hidden = false;
@@ -515,7 +614,7 @@
       currentTipTarget = t;
     });
     on(container, "mouseout", (ev) => {
-      const t = ev.target.closest("[data-tip], [data-col]");
+      const t = ev.target.closest("[data-tip], [data-col], .msa-residue");
       if (t && currentTipTarget === t) {
         tipEl.hidden = true;
         currentTipTarget = null;
@@ -702,28 +801,51 @@
       });
 
       function scrollToColumn(col) {
-        const queryRow = wrapper.querySelector(".static-msa-query .static-msa-seq");
-        if (!queryRow) return;
-        const cells = queryRow.children;
-        let matchIdx = 0;
-        let target = null;
-        for (const c of cells) {
-          if (c.classList.contains("msa-residue") && !c.classList.contains("msa-insert")) {
-            matchIdx++;
-            if (matchIdx === col) { target = c; break; }
-          }
-        }
-        if (!target) return;
-        const tableRect = table.getBoundingClientRect();
-        const targetRect = target.getBoundingClientRect();
-        const center =
-          table.scrollLeft +
-          (targetRect.left - tableRect.left) -
-          tableRect.width / 2 +
-          targetRect.width / 2;
+        // 1-indexed match column; with column virtualization the target
+        // cell is typically NOT in the DOM yet, so we compute the scroll
+        // target from colOffsets/cellWidthPx, then flash the cell after
+        // the smooth-scroll animation lands and drawList puts it back.
+        const matchIdx = col - 1;
+        if (matchIdx < 0 || matchIdx >= viewer.matchLen) return;
+        if (!colOffsets) return;
+        if (cellWidthPx <= 0) measureCellWidth();
+        if (cellWidthPx <= 0) return;
+
+        const insertWidthsHere = getInsertWidths();
+        const insertW = insertWidthsHere ? (insertWidthsHere[matchIdx] || 0) : 0;
+        // Match cell sits inside slot at colOffsets[matchIdx], after the
+        // pre-insert. Convert to pixels in scroll-content coordinates.
+        const cellLeftCh = colOffsets[matchIdx] + insertW;
+        const seqStartPx = state.labelWidth + 8; // 0.5rem padding-left
+        const cellLeftPx = seqStartPx + cellLeftCh * cellWidthPx;
+        const center = cellLeftPx - table.clientWidth / 2 + cellWidthPx / 2;
         table.scrollTo({ left: Math.max(0, center), behavior: "smooth" });
-        target.classList.add("msa-flash");
-        setTimeout(() => target.classList.remove("msa-flash"), 900);
+
+        // Find and flash the cell after the scroll lands. The drawList
+        // tied to the final scroll event will have placed it in the DOM.
+        setTimeout(() => {
+          // Walk the static query row first (always present when query
+          // is pinned); fall back to row 0 of the virtual list.
+          const seqEl = (staticQueryBody)
+            || (list.firstElementChild && list.firstElementChild.querySelector(".static-msa-seq"));
+          if (!seqEl) return;
+          const row = seqEl.parentElement;
+          const cs = (row && row._colStart) || 0;
+          if (matchIdx < cs) return;
+          let count = 0;
+          let target = null;
+          for (const c of seqEl.children) {
+            if (c.classList.contains("msa-residue") &&
+                !c.classList.contains("msa-insert") &&
+                !c.classList.contains("msa-spacer")) {
+              if (cs + count === matchIdx) { target = c; break; }
+              count++;
+            }
+          }
+          if (!target) return;
+          target.classList.add("msa-flash");
+          setTimeout(() => target.classList.remove("msa-flash"), 900);
+        }, 380);
       }
 
       const paletteSel = document.createElement("select");
@@ -758,6 +880,7 @@
         state.fontPx = FONT_DEFAULT;
         applyFont(wrapper);
         refreshZoomLabel();
+        measureCellWidth();
         drawList();
         persist();
       });
@@ -887,6 +1010,10 @@
         state.fontPx = next;
         applyFont(wrapper);
         refreshZoomLabel();
+        // Cell width in px tracks --msa-font-size; remeasure before
+        // the next col-range computation. Zoom usually shrinks/expands
+        // the visible window enough that liveRowsKey will change anyway.
+        measureCellWidth();
         drawList();
         persist();
       }
@@ -902,8 +1029,78 @@
       const list = document.createElement("div");
       list.className = "static-msa-list";
 
+      // Hidden sentinel for measuring `1ch` in pixels at the current
+      // font size. Sized via the same .msa-residue rule the real cells
+      // use, so getBoundingClientRect().width stays accurate as zoom
+      // changes. Lives on the wrapper so it's measured against the
+      // viewer's font, not whatever the host page applies.
+      const cellProbe = document.createElement("span");
+      cellProbe.className = "msa-residue msa-cell-probe";
+      cellProbe.textContent = "M";
+      cellProbe.setAttribute("aria-hidden", "true");
+      wrapper.appendChild(cellProbe);
+
+      // Column-virt state. colOffsets[i] = left edge of slot i in ch
+      // (slot i = optional pre-insert + match cell i; trailing insert
+      // sits at colOffsets[matchLen]). cellWidthPx is `1ch` measured
+      // from the probe; the two together let us derive the visible
+      // match-col window from `table.scrollLeft` + `table.clientWidth`.
+      let cellWidthPx = 0;
+      let colOffsets = null;
+      let currentCs = 0;
+      let currentCe = viewer.matchLen;
+      // Body element of the sticky query row, kept around so horizontal
+      // scrolls can re-render its slice without rebuilding the whole row.
+      let staticQueryBody = null;
+
       function rowHeight() {
         return Math.max(1, Math.ceil(state.fontPx * ROW_LINE_HEIGHT));
+      }
+
+      function recomputeColLayout(insertWidths) {
+        const m = viewer.matchLen | 0;
+        const off = new Int32Array(m + 1);
+        let acc = 0;
+        for (let i = 0; i < m; i++) {
+          off[i] = acc;
+          acc += (insertWidths ? (insertWidths[i] || 0) : 0) + 1;
+        }
+        off[m] = acc;
+        colOffsets = off;
+      }
+
+      function measureCellWidth() {
+        const w = cellProbe.getBoundingClientRect().width;
+        if (w > 0) cellWidthPx = w;
+      }
+
+      // Compute [cs, ce) — the match-column window to render. Full
+      // matchLen when content fits in the viewport (no horizontal
+      // scroll); a clipped slice with COL_OVERSCAN otherwise.
+      function computeColRange() {
+        const m = viewer.matchLen | 0;
+        if (m === 0 || !colOffsets) return { cs: 0, ce: m };
+        if (cellWidthPx <= 0) measureCellWidth();
+        if (cellWidthPx <= 0) return { cs: 0, ce: m };
+
+        const seqStartPx = state.labelWidth + 8; // 0.5rem padding-left
+        const viewportPx = table.clientWidth;
+        const totalContentPx = colOffsets[m] * cellWidthPx;
+        // Whole alignment fits — skip virt entirely.
+        if (totalContentPx <= viewportPx) return { cs: 0, ce: m };
+
+        const visibleLeftPx = Math.max(0, table.scrollLeft - seqStartPx);
+        const visibleRightPx = visibleLeftPx + viewportPx;
+        const visibleLeftCh = visibleLeftPx / cellWidthPx;
+        const visibleRightCh = visibleRightPx / cellWidthPx;
+
+        let cs = 0;
+        while (cs < m && colOffsets[cs + 1] <= visibleLeftCh) cs++;
+        let ce = cs;
+        while (ce < m && colOffsets[ce] < visibleRightCh) ce++;
+        cs = Math.max(0, cs - COL_OVERSCAN);
+        ce = Math.min(m, ce + COL_OVERSCAN);
+        return { cs, ce };
       }
 
       function getFiltered() {
@@ -935,7 +1132,13 @@
         }
         labelResize.style.display = "";
         table.innerHTML = "";
+        staticQueryBody = null;
         const insertWidths = getInsertWidths();
+        recomputeColLayout(insertWidths);
+        // Ruler + histogram stay full-width — they're rebuilt only on
+        // drawAll (filter / inserts / palette / zoom), not on scroll,
+        // so the cost is amortized and the visible alignment stays
+        // visually consistent under horizontal scroll.
         renderRulerRow(table, viewer.matchLen, insertWidths);
         renderHistogramRow(
           table,
@@ -951,9 +1154,17 @@
         // row 0 (or whatever's marked isQuery) actually is the query.
         // Otherwise it flows into the virtualized list with the rest.
         if (state.firstRowIsQuery) {
-          renderRow(table, query, "static-msa-query", insertWidths, currentRowStats);
+          const queryRow = renderRow(
+            table, query, "static-msa-query", insertWidths, currentRowStats,
+            0, viewer.matchLen,
+          );
+          // Resolve a quick reference for slice updates on horizontal scroll.
+          if (queryRow) staticQueryBody = queryRow.querySelector(".static-msa-seq");
         }
         table.appendChild(list);
+        // First measurement happens after the probe has laid out under
+        // the active --msa-font-size, which the wrapper now carries.
+        measureCellWidth();
         drawList(insertWidths);
       }
 
@@ -1013,7 +1224,25 @@
         const rh = rowHeight();
         list.style.height = `${filtered.length * rh}px`;
 
-        const newKey = `${state.filter}|${state.firstRowIsQuery}|${state.showInserts}|${state.fontPx}`;
+        // Column window. When it changes, all live rows must be rebuilt
+        // (their cached HTML is keyed by [cs, ce]); fold the range into
+        // liveRowsKey so the existing invalidation handles it.
+        const range = computeColRange();
+        const cs = range.cs;
+        const ce = range.ce;
+        currentCs = cs;
+        currentCe = ce;
+
+        // Static query row (rendered in drawAll) re-slices its sequence
+        // body to track the visible window. Cache hits inside renderSequence
+        // when [cs, ce] hasn't moved.
+        if (staticQueryBody) {
+          renderSequence(staticQueryBody, query, insertWidths, cs, ce);
+          const sqRow = staticQueryBody.parentElement;
+          if (sqRow) sqRow._colStart = cs;
+        }
+
+        const newKey = `${state.filter}|${state.firstRowIsQuery}|${state.showInserts}|${state.fontPx}|${cs}|${ce}`;
         if (newKey !== liveRowsKey) {
           list.innerHTML = "";
           liveRows.clear();
@@ -1043,7 +1272,7 @@
         let toAdd = null;
         for (let i = startRow; i < endRow; i++) {
           if (liveRows.has(i)) continue;
-          const row = buildVirtualRow(filtered[i], i * rh, insertWidths);
+          const row = buildVirtualRow(filtered[i], i * rh, insertWidths, cs, ce);
           liveRows.set(i, row);
           if (!toAdd) toAdd = document.createDocumentFragment();
           toAdd.appendChild(row);
@@ -1065,10 +1294,13 @@
         nextBtn.disabled = table.scrollTop >= list.offsetTop + list.offsetHeight - viewportH - 1;
       }
 
-      function buildVirtualRow(entry, top, insertWidths) {
+      function buildVirtualRow(entry, top, insertWidths, cs, ce) {
         const row = document.createElement("div");
         row.className = "static-msa-row";
-        row.style.top = `${top}px`;
+        row.style.transform = `translateY(${top}px)`;
+        // Recorded so the hover handler can derive a match-col index
+        // from sibling position without scanning insertWidths.
+        row._colStart = cs;
         const label = document.createElement("span");
         label.className = "static-msa-label";
         const nameText = entry.name || entry.id || "";
@@ -1076,7 +1308,7 @@
         decorateRowLabel(label, entry, nameText);
         const body = document.createElement("span");
         body.className = "static-msa-seq";
-        renderSequence(body, entry, insertWidths);
+        renderSequence(body, entry, insertWidths, cs, ce);
         row.appendChild(label);
         row.appendChild(body);
         return row;
@@ -2485,10 +2717,17 @@
       return lines.join("\n");
     }
 
-    function renderRow(parent, entry, extraClass, insertWidths, rowStats) {
+    function renderRow(parent, entry, extraClass, insertWidths, rowStats, colStart, colEnd) {
       const row = document.createElement("div");
       row.className = "static-msa-row";
       if (extraClass) row.classList.add(extraClass);
+      // Recorded so the hover handler can derive a match-col index
+      // from sibling position. The pinned query row is only rebuilt
+      // on drawAll, but its sequence body re-slices on every drawList;
+      // the colStart for both is whatever drawAll passed in (initially
+      // 0 — drawList updates it via renderSequence on horizontal scroll
+      // and also rewrites the row._colStart in syncStaticQueryColStart).
+      row._colStart = colStart != null ? colStart : 0;
       const label = document.createElement("span");
       label.className = "static-msa-label";
       const nameText = entry.name || entry.id || "";
@@ -2496,10 +2735,11 @@
       decorateRowLabelImpl(label, entry, nameText, rowStats);
       const body = document.createElement("span");
       body.className = "static-msa-seq";
-      renderSequence(body, entry, insertWidths);
+      renderSequence(body, entry, insertWidths, colStart, colEnd);
       row.appendChild(label);
       row.appendChild(body);
       parent.appendChild(row);
+      return row;
     }
 
     function coverColorTip(mode) {
@@ -2665,88 +2905,112 @@
         : "";
     }
 
-    // Per-entry sequence-HTML cache. The HTML for a row depends only on
-    // its own matchSeq + inserts and the global showInserts flag (a row
-    // either includes insert columns or it doesn't). Building the string
-    // is the dominant per-scroll cost; caching it makes the second and
-    // later renders of the same row a single innerHTML assignment.
-    //
-    // Cache key on the entry: { with: html, without: html }. WeakMap so
-    // entries that get GC'd take their cache with them.
+    // Per-entry sequence-HTML cache. WeakMap so entries that get GC'd
+    // take their cache with them. Stores at most one (key, html) pair
+    // per entry — vertical scroll keeps the key stable; horizontal
+    // scroll / zoom / inserts toggle changes it and forces a rebuild.
     const sequenceHtmlCache = new WeakMap();
 
-    function buildSequenceHtml(entry, insertWidths) {
+    // Build the inner HTML for one row's sequence track.
+    //
+    // Optional [colStart, colEnd) clips the rendered match cells to a
+    // window — column virtualization. Off-window space becomes a single
+    // transparent spacer per side so the row's intrinsic width still
+    // matches the full alignment (preserves horizontal scroll geometry
+    // and keeps ruler/histogram visually aligned).
+    //
+    // Insert handling: insertRun[i] sits between match[i-1] and match[i]
+    // (insertRun[0] = leading inserts before match[0]; insertRun[total]
+    // = trailing inserts after match[total-1]). Inserts BETWEEN two
+    // visible match cells are emitted inline. insertRun[cs] sits between
+    // an off-window cell and a visible cell — it goes into the left
+    // spacer (chars are not visible context for the visible window).
+    // Symmetric on the right. The exception is the boundary: when cs==0
+    // the leading insert is genuinely visible context for match[0], and
+    // when ce==total the trailing insert sits after the last visible
+    // match cell — both are emitted inline rather than absorbed.
+    function buildSequenceHtml(entry, insertWidths, colStart, colEnd) {
       const matchSeq = entry.matchSeq || "";
       const inserts = entry.inserts || {};
-      let out = "";
+      const total = matchSeq.length;
+      const cs = colStart != null ? Math.max(0, colStart) : 0;
+      const ce = colEnd != null ? Math.min(total, colEnd) : total;
+
+      let leftCh = 0;
+      let rightCh = 0;
       if (insertWidths) {
-        out += insertHtml(inserts[0] || "", insertWidths[0]);
-        for (let i = 0; i < matchSeq.length; i++) {
-          out += matchHtml(matchSeq[i], i);
-          out += insertHtml(inserts[i + 1] || "", insertWidths[i + 1] || 0);
+        // Slots [0, cs) — every slot pair (insertRun + match) absorbed.
+        for (let i = 0; i < cs; i++) leftCh += 1 + (insertWidths[i] || 0);
+        // insertRun[cs] joins the spacer ONLY when cs > 0. At cs == 0
+        // it's the leading insert and should render inline.
+        if (cs > 0) leftCh += insertWidths[cs] || 0;
+        // Right side: when ce < total, absorb insertRun[ce] + slots
+        // [ce, total) + trailing insertRun[total].
+        if (ce < total) {
+          rightCh += insertWidths[ce] || 0;
+          for (let i = ce; i < total; i++) rightCh += 1 + (insertWidths[i + 1] || 0);
         }
       } else {
-        for (let i = 0; i < matchSeq.length; i++) out += matchHtml(matchSeq[i], i);
+        leftCh = cs;
+        rightCh = total - ce;
       }
+
+      let out = "";
+      if (leftCh > 0) out += spacerHtml(leftCh);
+      if (insertWidths) {
+        if (cs === 0 && (insertWidths[0] || 0) > 0) {
+          out += insertRunHtml(inserts[0] || "", insertWidths[0] || 0);
+        }
+        for (let i = cs; i < ce; i++) {
+          out += matchCellHtml(matchSeq[i]);
+          if (i + 1 < ce) {
+            out += insertRunHtml(inserts[i + 1] || "", insertWidths[i + 1] || 0);
+          }
+        }
+        if (ce === total && (insertWidths[total] || 0) > 0) {
+          out += insertRunHtml(inserts[total] || "", insertWidths[total] || 0);
+        }
+      } else {
+        for (let i = cs; i < ce; i++) out += matchCellHtml(matchSeq[i]);
+      }
+      if (rightCh > 0) out += spacerHtml(rightCh);
       return out;
     }
 
-    function renderSequence(container, entry, insertWidths) {
-      const key = insertWidths ? "with" : "without";
-      let cache = sequenceHtmlCache.get(entry);
-      if (cache && cache[key] !== undefined) {
-        container.innerHTML = cache[key];
+    // Per-entry sequence HTML cache — keyed by the render parameters.
+    // Vertical scroll keeps the same key (cache hits, every new row in
+    // the viewport pays only the innerHTML parse). Horizontal scroll
+    // and zoom change the key (rebuild on miss).
+    function renderSequence(container, entry, insertWidths, colStart, colEnd) {
+      const total = (entry.matchSeq || "").length;
+      const cs = colStart != null ? colStart : 0;
+      const ce = colEnd != null ? colEnd : total;
+      const key = `${insertWidths ? 1 : 0}|${cs}|${ce}`;
+      const cache = sequenceHtmlCache.get(entry);
+      if (cache && cache.key === key) {
+        container.innerHTML = cache.html;
         return;
       }
-      const html = buildSequenceHtml(entry, insertWidths);
-      if (!cache) {
-        cache = {};
-        sequenceHtmlCache.set(entry, cache);
-      }
-      cache[key] = html;
+      const html = buildSequenceHtml(entry, insertWidths, cs, ce);
+      sequenceHtmlCache.set(entry, { key, html });
       container.innerHTML = html;
     }
 
-    function matchHtml(ch, colIdx) {
-      const cls = residueClass(ch);
-      const upper = ch >= "a" && ch <= "z" ? String.fromCharCode(ch.charCodeAt(0) - 32) : ch;
-      const aa = (upper >= "A" && upper <= "Z") ? ` data-aa="${upper}"` : "";
-      const col = colIdx != null ? ` data-col="${colIdx}"` : "";
-      return `<span class="msa-residue msa-aa-${cls}"${aa}${col}>${htmlEscapeChar(ch)}</span>`;
+    function spacerHtml(widthCh) {
+      return `<span class="msa-residue msa-spacer msa-aa-gap" style="width:${widthCh}ch"></span>`;
     }
 
-    function insertHtml(text, width) {
+    function insertRunHtml(text, width) {
       if (width <= 0) return "";
       let out = "";
       for (let i = 0; i < text.length; i++) {
-        const ch = text[i];
-        const cls = residueClass(ch);
-        const upper = ch >= "a" && ch <= "z" ? String.fromCharCode(ch.charCodeAt(0) - 32) : ch;
-        const aa = (upper >= "A" && upper <= "Z") ? ` data-aa="${upper}"` : "";
-        out += `<span class="msa-residue msa-aa-${cls} msa-insert"${aa}>${htmlEscapeChar(ch)}</span>`;
+        out += insertCellHtml(text[i]);
       }
       const pad = width - text.length;
       if (pad > 0) {
         out += `<span class="msa-residue msa-aa-gap msa-insert msa-insert-pad" style="width:${pad}ch">${".".repeat(pad)}</span>`;
       }
       return out;
-    }
-
-    function residueClass(residue) {
-      switch (String(residue).toUpperCase()) {
-        case "A": case "I": case "L": case "M":
-        case "F": case "W": case "V":
-          return "hydrophobic";
-        case "D": case "E": return "acidic";
-        case "K": case "R": return "basic";
-        case "H": case "Y": return "aromatic";
-        case "S": case "T": case "N": case "Q": return "polar";
-        case "C": return "cysteine";
-        case "G": return "glycine";
-        case "P": return "proline";
-        case "-": case ".": return "gap";
-        default: return "other";
-      }
     }
 
     async function toggleFullscreen(wrapper) {

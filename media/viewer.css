@@ -297,22 +297,24 @@ html, body {
 }
 
 /* Virtual list of hit rows. Height set in JS = filtered.length × rh.
- * Rows inside are absolutely positioned by index × rh; only rows in or
- * near the viewport are present in the DOM. */
+ * Rows inside are absolutely positioned and translated to their slot;
+ * only rows in or near the viewport are present in the DOM. */
 .static-msa-list {
   position: relative;
-  /* Hint to put the scrolling subtree on its own compositor layer so the
-   * browser can scroll on the GPU without re-painting siblings. */
-  will-change: transform;
 }
 
 .static-msa-list > .static-msa-row {
   position: absolute;
+  top: 0;
   left: 0;
   right: 0;
   /* Row height tracks zoom; matches the JS rowHeight() formula. */
   height: calc(var(--msa-font-size, 10px) * 1.25);
   border-bottom: 0;
+  /* Y offset is set via JS as `transform: translateY(<rh*idx>px)`.
+   * `top` would trigger layout on every scroll redraw; transform stays
+   * on the compositor. */
+  will-change: transform;
 }
 
 /* Inside the virtual list, drop vertical padding so the rendered cell
@@ -601,6 +603,26 @@ html, body {
 
 .msa-residue.msa-insert {
   opacity: 0.55;
+}
+
+/* Column-virt left/right spacer cells. Carry the cell width but
+ * nothing else — no hover, no flash, no palette tint. The hover
+ * handler also rejects them by class, but pointer-events: none
+ * stops the events at the source. */
+.msa-residue.msa-spacer {
+  background: transparent;
+  pointer-events: none;
+}
+
+/* Hidden sentinel used to measure `1ch` in pixels at the active
+ * --msa-font-size. Not in the layout; absolutely positioned off-screen
+ * but still rendered so getBoundingClientRect returns a real width. */
+.msa-cell-probe {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .msa-residue.msa-flash {
