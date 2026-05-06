@@ -1977,7 +1977,10 @@
       const seqW = Math.max(0, containerW - overhead);
       const charW = state.fontPx * 0.6;
       const fit = Math.floor(seqW / Math.max(1, charW));
-      return clamp(fit, BREAK_AFTER_MIN, BREAK_AFTER_MAX);
+      // Auto-fit: cap on the low end only. The viewport width is the
+      // real limit — clamping to BREAK_AFTER_MAX (a manual-input cap)
+      // would leave whitespace on wide windows.
+      return Math.max(BREAK_AFTER_MIN, fit);
     }
 
     /**
