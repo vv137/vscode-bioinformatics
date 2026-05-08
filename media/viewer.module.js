@@ -153,6 +153,10 @@
     return v < lo ? lo : v > hi ? hi : v;
   }
 
+  function rootFontPx() {
+    return parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  }
+
   /**
    * UniProt/UniRef FASTA header parsers — pure, return null on miss.
    *
@@ -478,9 +482,15 @@
     // the regex+resolver work eliminates a lot of string scanning.
     // Keyed by entry; invalidated when the cached `text` differs.
     const headerCache = new WeakMap();
-    function getHeaderInfo(entry, text) {
+    // Templates mode passes a different `text` (the parsed t.accession,
+    // not entry.name) to renderLinkedHeader. Sharing `headerCache` across
+    // modes would make the two evict each other on every mode toggle, so
+    // templates rows get their own per-entry cache.
+    const templatesHeaderCache = new WeakMap();
+    function getHeaderInfo(entry, text, cache) {
+      const store = cache || headerCache;
       if (entry) {
-        const c = headerCache.get(entry);
+        const c = store.get(entry);
         if (c && c.text === text) return c;
       }
       const m = /^(\S+)(\s.*)?$/.exec(text);
@@ -491,7 +501,18 @@
         || parseUniRefHeader(text)
         || parseUniParcHeader(text);
       const info = { text, head, tail, link, parsed };
-      if (entry) headerCache.set(entry, info);
+      if (entry) store.set(entry, info);
+      return info;
+    }
+
+    // Caches null results too (regex non-match) — `.has` distinguishes
+    // unset from cached-null.
+    const templateInfoCache = new WeakMap();
+    function getTemplateInfo(entry) {
+      if (!entry) return null;
+      if (templateInfoCache.has(entry)) return templateInfoCache.get(entry);
+      const info = parseTemplateName(entry.name || entry.id || "");
+      templateInfoCache.set(entry, info);
       return info;
     }
 
@@ -790,7 +811,7 @@
         state.scrollTop = 0;
         table.scrollTop = 0;
         persist();
-        drawAll();
+        redrawIfNotTemplates();
       });
 
       const gotoInput = document.createElement("input");
@@ -904,7 +925,7 @@
           state.showInserts = !state.showInserts;
           toggleBtn.setAttribute("aria-pressed", String(state.showInserts));
           persist();
-          drawAll();
+          redrawIfNotTemplates();
         });
       }
 
@@ -951,7 +972,7 @@
         state.firstRowIsQuery = queryToggleInput.checked;
         persist();
         currentRowStats = computeRowStats(viewer, query, state.firstRowIsQuery);
-        drawAll();
+        redrawIfNotTemplates();
       });
 
       const fullBtn = makeBtn("msa-fullscreen-btn", "");
@@ -1129,7 +1150,15 @@
         const i = order.indexOf(state.msaCoverColor);
         state.msaCoverColor = order[(i + 1) % order.length];
         persist();
-        drawAll();
+        redrawIfNotTemplates();
+      }
+
+      // Templates view's render path consults none of state.filter,
+      // showInserts, firstRowIsQuery, or msaCoverColor. Use this guard
+      // at call sites whose only effect would be a templates-mode
+      // no-op redraw.
+      function redrawIfNotTemplates() {
+        if (!state.msaTemplatesMode) drawAll();
       }
 
       function drawAll() {
@@ -1440,7 +1469,7 @@
               state.scrollTop = 0;
               table.scrollTop = 0;
               persist();
-              drawAll();
+              redrawIfNotTemplates();
             } else {
               filterInput.blur();
             }
@@ -1686,6 +1715,121 @@
       wrapper.appendChild(body);
       container.appendChild(wrapper);
 
+      // Block-level lazy materialization: each alignment is rendered
+      // only when it scrolls into view, then cached keyed by
+      // `(num, breakAfter)` so resize back to a width we've already
+      // seen is a Map lookup. Keeps active DOM proportional to the
+      // viewport, not to hit count.
+      const blockCache = new Map();
+      const BLOCK_CACHE_CAP = 120;
+      let blockSlots = [];
+      let blockObserver = null;
+
+      function countAlignmentLines(al) {
+        let n = 2; // Q seq + T seq always present
+        if (al.querySsPred && al.querySsPred.seq) n++;
+        if (al.queryConsensus && al.queryConsensus.seq) n++;
+        if (al.agree) n++;
+        if (al.templateConsensus && al.templateConsensus.seq) n++;
+        if (al.templateSsDssp && al.templateSsDssp.seq) n++;
+        if (al.templateSsPred && al.templateSsPred.seq) n++;
+        if (al.confidence) n++;
+        if (al.pp) n++;
+        return n;
+      }
+
+      // Estimate block height (px) so placeholders take roughly the
+      // same vertical space as the rendered block. Slight under/over
+      // is fine — the layout snaps to the real height on materialize.
+      function estimateBlockHeight(al, breakAfter) {
+        const root = rootFontPx();
+        const totalCols =
+          (al.query && al.query.seq ? al.query.seq.length : 0) ||
+          (al.template && al.template.seq ? al.template.seq.length : 0) || 0;
+        const chunks = Math.max(1, Math.ceil(totalCols / Math.max(1, breakAfter)));
+        const lines = countAlignmentLines(al);
+        const lineH = state.fontPx * 1.25 + 1;     // .hhr-line line-height
+        const chunkGap = 0.65 * root;              // .hhr-chunk margin-bottom
+        const headerH = 0.92 * root + 0.2 * root;  // .hhr-block-header
+        const metaH = 0.78 * root + 0.4 * root;    // .hhr-block-meta
+        const blockGap = 1.5 * root;               // .hhr-block margin-bottom
+        return Math.round(
+          headerH + metaH + chunks * (lines * lineH + chunkGap) + blockGap,
+        );
+      }
+
+      function setBlockCache(key, el) {
+        blockCache.set(key, el);
+        while (blockCache.size > BLOCK_CACHE_CAP) {
+          const oldest = blockCache.keys().next().value;
+          blockCache.delete(oldest);
+        }
+      }
+
+      function materializeSlot(slot, breakAfter) {
+        if (slot.materialized) return;
+        const key = `${slot.num}|${breakAfter}`;
+        let block = blockCache.get(key);
+        if (!block) {
+          block = renderAlignmentBlock(slot.al, breakAfter);
+          setBlockCache(key, block);
+        }
+        if (blockObserver) blockObserver.unobserve(slot.el);
+        slot.el.parentNode.replaceChild(block, slot.el);
+        slot.el = block;
+        slot.materialized = true;
+      }
+
+      function mountAlignments(breakAfter) {
+        const eff = breakAfter && breakAfter > 0 ? breakAfter : 80;
+        if (blockObserver) {
+          blockObserver.disconnect();
+          blockObserver = null;
+        }
+        alignmentsSection.innerHTML = "";
+        blockSlots = [];
+
+        for (const al of hhr.alignments) {
+          const ph = document.createElement("div");
+          ph.className = "hhr-block hhr-block-placeholder";
+          ph.dataset.num = String(al.num);
+          ph.style.minHeight = `${estimateBlockHeight(al, eff)}px`;
+          alignmentsSection.appendChild(ph);
+          blockSlots.push({
+            num: String(al.num),
+            al,
+            el: ph,
+            materialized: false,
+          });
+        }
+
+        if (typeof IntersectionObserver === "function") {
+          blockObserver = new IntersectionObserver(
+            (entries) => {
+              for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                const num = entry.target.dataset.num;
+                const slot = blockSlots.find((s) => s.num === num);
+                if (slot && !slot.materialized) materializeSlot(slot, eff);
+              }
+            },
+            { root: body, rootMargin: "600px 0px" },
+          );
+          for (const slot of blockSlots) blockObserver.observe(slot.el);
+        } else {
+          for (const slot of blockSlots) materializeSlot(slot, eff);
+        }
+      }
+
+      function ensureSlotMaterialized(num) {
+        const slot = blockSlots.find((s) => s.num === String(num));
+        if (!slot) return null;
+        if (!slot.materialized) {
+          materializeSlot(slot, lastBreak > 0 ? lastBreak : 80);
+        }
+        return slot;
+      }
+
       // Initial render uses the now-laid-out body width to compute
       // auto-fit. Subsequent resizes re-render only when the computed
       // breakAfter actually changes (avoids needless DOM churn on
@@ -1695,15 +1839,13 @@
         const next = computeBreakAfter(body);
         if (next === lastBreak) return;
         lastBreak = next;
-        alignmentsSection.innerHTML = "";
-        renderAlignments(alignmentsSection, hhr, next);
+        mountAlignments(next);
       }
       rerenderIfBreakChanged();
 
       function rerenderAlignments() {
         lastBreak = computeBreakAfter(body);
-        alignmentsSection.innerHTML = "";
-        renderAlignments(alignmentsSection, hhr, lastBreak);
+        mountAlignments(lastBreak);
       }
       function rerenderHits() {
         hitsSection.innerHTML = "";
@@ -1754,9 +1896,15 @@
       // that alignment block into view. Click "No N." inside an
       // alignment block → scroll the matching row in the hit table.
       function scrollToBlock(num) {
-        const target = wrapper.querySelector(
-          `.hhr-block[data-num="${CSS.escape(String(num))}"]`,
-        );
+        // Materialize the target if it's still a placeholder; otherwise
+        // scrollIntoView would land on a stub of the wrong size and the
+        // user would have to scroll again after it expanded.
+        const slot = ensureSlotMaterialized(num);
+        const target = slot
+          ? slot.el
+          : wrapper.querySelector(
+              `.hhr-block[data-num="${CSS.escape(String(num))}"]`,
+            );
         if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
       }
       function scrollToHitRow(num) {
@@ -1871,7 +2019,7 @@
         }
         if (first === -1) continue;
         const num = i + 1;
-        const t = parseTemplateName(e.name || "") || null;
+        const t = getTemplateInfo(e);
         const acc = (t && t.accession) || (e.name || "").split(/\s+/)[0] || `entry ${num}`;
         const desc = (t && t.description) || e.name || "";
         items.push({
@@ -1907,7 +2055,7 @@
       const tbody = document.createElement("tbody");
       for (let i = 0; i < viewer.entries.length; i++) {
         const e = viewer.entries[i];
-        const t = parseTemplateName(e.name || e.id || "") || {
+        const t = getTemplateInfo(e) || {
           accession: e.id || e.name || "",
           description: e.name || "",
         };
@@ -1922,7 +2070,10 @@
         tr.appendChild(numTd);
 
         const accTd = document.createElement("td");
-        renderLinkedHeader(accTd, t.accession || "");
+        renderLinkedHeader(accTd, t.accession || "", {
+          entry: e,
+          cache: templatesHeaderCache,
+        });
         tr.appendChild(accTd);
 
         const rangeTd = document.createElement("td");
@@ -1946,13 +2097,6 @@
       parent.appendChild(tbl);
     }
 
-    function renderAlignments(parent, hhr, breakAfter) {
-      const eff = breakAfter && breakAfter > 0 ? breakAfter : 80;
-      for (const al of hhr.alignments) {
-        parent.appendChild(renderAlignmentBlock(al, eff));
-      }
-    }
-
     /**
      * Decide how many columns each alignment chunk should hold. If
      * the user pinned a value via the input, use that; otherwise fit
@@ -1965,8 +2109,7 @@
      */
     function computeBreakAfter(bodyEl) {
       if (state.breakAfter && state.breakAfter > 0) return state.breakAfter;
-      const root =
-        parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      const root = rootFontPx();
       const labelW = 7 * root;       // .hhr-line grid col 1
       const startW = 2.5 * root;     // .hhr-line grid col 2
       const endW = 2.5 * root;       // .hhr-line grid col 4
@@ -2454,8 +2597,11 @@
       // Pulls head / tail / link / parsed from the per-entry cache when
       // an entry is provided (typical for MSA row labels), or computes
       // them inline for one-off call sites (HHR descriptions, template
-      // table cells).
-      const info = getHeaderInfo(opts2.entry, text);
+      // table cells). `opts2.cache` is an optional override WeakMap so
+      // call sites that pass a different `text` for the same entry
+      // (e.g. templates pass t.accession instead of entry.name) don't
+      // evict the MSA-mode cache entry.
+      const info = getHeaderInfo(opts2.entry, text, opts2.cache);
       const { head, tail, link, parsed } = info;
       const tip = parsed
         ? formatHeaderTip(parsed, link)
